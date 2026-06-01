@@ -75,6 +75,33 @@
 
 SpringBoot + RocketMQ + Redis + MySQL + MyBatis Plus + MinIO + FFmpeg + LangChain4j
 
-## 本地配置
+## 快速启动
 
-复制 `server/src/main/resources/application.properties.example` 为 `application.properties`，填入本地数据库、API Key 与工具路径后即可启动。
+**环境：** Docker、Java 21、Maven、Node.js 18+；视频处理需 FFmpeg，在线链接解析需 yt-dlp。
+
+```bash
+# 1. 启动中间件（MySQL / Redis / MinIO / RocketMQ）
+docker-compose up -d
+
+# 2. 配置后端：复制示例文件并填入本地密钥与工具路径
+cp server/src/main/resources/application.properties.example server/src/main/resources/application.properties
+
+# 3. 启动后端（端口 9090）
+cd server && mvn spring-boot:run
+
+# 4. 启动前端（端口 5173）
+cd client && npm install && npm run dev
+```
+
+浏览器访问 http://localhost:5173 。首次使用需在 MySQL `media_db` 中创建 `users`、`media_files` 表（字段见 `server/src/main/java/com/example/server/entity/`）。
+
+| 服务 | 地址 |
+|------|------|
+| 前端 | http://localhost:5173 |
+| 后端 | http://localhost:9090 |
+| MinIO 控制台 | http://localhost:9001 |
+| RocketMQ Dashboard | http://localhost:8180 |
+
+## 贡献者
+
+- [Yongxincc](https://github.com/Yongxincc)
