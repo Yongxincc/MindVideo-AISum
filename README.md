@@ -21,44 +21,6 @@
     <img src="https://img.shields.io/badge/License-MIT-818cf8?style=for-the-badge&labelColor=18181b" alt="MIT License"/>
   </a>
 
-  <br/><br/>
-
-  <img src="https://img.shields.io/badge/分片断点续传-弱网可用-6366f1?style=flat-square&labelColor=27272a"/>
-  <img src="https://img.shields.io/badge/RocketMQ-异步削峰-FF6A00?style=flat-square&labelColor=27272a&logo=apacherocketmq&logoColor=white"/>
-  <img src="https://img.shields.io/badge/Redisson-分布式锁-DC382D?style=flat-square&labelColor=27272a&logo=redis&logoColor=white"/>
-  <img src="https://img.shields.io/badge/LangChain4j-Function_Calling-8B5CF6?style=flat-square&labelColor=27272a"/>
-  <img src="https://img.shields.io/badge/MinIO-对象存储-FFC107?style=flat-square&labelColor=27272a&logo=minio&logoColor=white"/>
-
-  <br/><br/>
-
-  ### 🛠 技术栈
-
-  <table align="center" cellpadding="10">
-    <tr>
-      <td align="center" width="200"><strong>🖥 前端</strong><br/><br/>
-        <img src="https://go.skillicons.dev/icons?i=vue,ts,vite&theme=dark"/>
-      </td>
-      <td align="center" width="200"><strong>⚙️ 后端</strong><br/><br/>
-        <img src="https://go.skillicons.dev/icons?i=java,spring&theme=dark"/>
-      </td>
-      <td align="center" width="200"><strong>📦 存储 & 消息</strong><br/><br/>
-        <img src="https://go.skillicons.dev/icons?i=mysql,redis,docker&theme=dark"/>
-      </td>
-      <td align="center" width="200"><strong>🤖 AI & 媒体</strong><br/><br/>
-        <img src="https://img.shields.io/badge/FFmpeg-媒体处理-007808?style=flat-square&logo=ffmpeg&logoColor=white&labelColor=27272a"/>
-        <img src="https://img.shields.io/badge/yt--dlp-链接解析-FF0000?style=flat-square&labelColor=27272a"/>
-      </td>
-    </tr>
-    <tr>
-      <td colspan="4" align="center">
-        <strong>🐳 部署与工具</strong><br/><br/>
-        <img src="https://go.skillicons.dev/icons?i=docker,maven,nodejs,git&theme=dark"/>
-        &nbsp;
-        <img src="https://img.shields.io/badge/Docker_Compose-一键中间件-2496ED?style=for-the-badge&logo=docker&logoColor=white"/>
-      </td>
-    </tr>
-  </table>
-
 </div>
 
 ---
@@ -97,19 +59,19 @@
 
 ## 🎬 功能演示
 
-> **说明：** GitHub 的 README 会过滤 HTML `<video>` 标签，无法在仓库首页内嵌播放 MP4（与文件大小无关）。下方使用 **GIF 预览** 在 README 中直接展示动效；完整高清演示请点击链接在 GitHub 文件页播放。
+> **说明：** GitHub 的 README 会过滤 HTML `<video>` 标签，无法在仓库首页内嵌播放 MP4。下方 **GIF 为完整画面录屏**（与 MP4 视频轨一致）；带声音的原始 MP4 请点击下方按钮在 GitHub 文件页播放。
 
 ### 本地上传（拖拽 / 选择文件）
 
 <p align="center">
   <a href="https://github.com/Yongxincc/MindVideo-AISum/blob/main/docs/assets/demo-local-upload.mp4">
-    <img src="docs/assets/demo-local-preview.gif" alt="本地上传演示预览（前 12 秒）" width="860" />
+    <img src="docs/assets/demo-local-preview.gif" alt="本地上传完整演示动图" width="860" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Yongxincc/MindVideo-AISum/blob/main/docs/assets/demo-local-upload.mp4">
-    <img src="https://img.shields.io/badge/▶_观看完整演示-本地上传（约_55_秒）-6366f1?style=for-the-badge&labelColor=18181b" alt="观看完整本地上传演示"/>
+    <img src="https://img.shields.io/badge/▶_原始_MP4（含音频）-本地上传-6366f1?style=for-the-badge&labelColor=18181b" alt="观看本地上传原始 MP4"/>
   </a>
 </p>
 
@@ -121,13 +83,13 @@
 
 <p align="center">
   <a href="https://github.com/Yongxincc/MindVideo-AISum/blob/main/docs/assets/demo-url-upload.mp4">
-    <img src="docs/assets/demo-url-preview.gif" alt="链接导入演示预览（前 12 秒）" width="860" />
+    <img src="docs/assets/demo-url-preview.gif" alt="链接导入完整演示动图" width="860" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Yongxincc/MindVideo-AISum/blob/main/docs/assets/demo-url-upload.mp4">
-    <img src="https://img.shields.io/badge/▶_观看完整演示-链接导入（约_27_秒）-fbbf24?style=for-the-badge&labelColor=18181b" alt="观看完整链接导入演示"/>
+    <img src="https://img.shields.io/badge/▶_原始_MP4（含音频）-链接导入-fbbf24?style=for-the-badge&labelColor=18181b" alt="观看链接导入原始 MP4"/>
   </a>
 </p>
 
