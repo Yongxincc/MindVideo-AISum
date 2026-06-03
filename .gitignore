@@ -58,3 +58,10 @@ logs/
 uploads/
 temp/
 tmp/
+
+# ==============================
+# Docker 运行时数据
+# ==============================
+mysql/data/
+mysql/logs/
+minio/data/

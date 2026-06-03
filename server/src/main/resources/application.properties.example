@@ -18,7 +18,11 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.stdout.StdOutImpl
 # ==============================
 ai.deepseek.api-key=YOUR_DEEPSEEK_OR_SILICONFLOW_API_KEY
 ai.deepseek.base-url=https://api.siliconflow.cn/v1
+ai.deepseek.model=deepseek-ai/DeepSeek-V3
 ai.aliyun.api-key=YOUR_ALIYUN_API_KEY
+
+# ASR 单段最长秒数（SiliconFlow 限制 1 小时，默认 3300 = 55 分钟）
+asr.max-segment-seconds=3300
 
 # ==========================================
 # Redis 配置
@@ -38,6 +42,7 @@ minio.bucketName=media
 
 # ==========================================
 # 外部工具路径（按本机实际路径修改）
+# Windows 请用正斜杠 D:/apps/...，勿写 D:\apps\...（\f \t 会被 properties 转义）
 # ==========================================
 tool.ytdlp.path=C:/path/to/yt-dlp.exe
 tool.ffmpeg.dir=C:/path/to/ffmpeg/bin

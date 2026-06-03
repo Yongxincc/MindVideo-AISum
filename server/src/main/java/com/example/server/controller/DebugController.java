@@ -4,6 +4,7 @@ import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import com.example.server.service.AiService;
+import com.example.server.util.TranscriptStatusHelper;
 import com.example.server.strategy.AiAnalysisStrategy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -76,8 +77,18 @@ public class DebugController {
             //查库校验
             MediaFile file = mediaFileMapper.selectById(id);
             if (file == null) return "文件不存在";
-            if (file.getAiSummary() != null && file.getAiSummary().contains("正在")) {
-                return "任务已在后台运行，无需重复提交";
+            String existingSummary = file.getAiSummary();
+            if (existingSummary != null) {
+                boolean inProgress = existingSummary.contains("正在分析")
+                        || existingSummary.contains("[MQ]")
+                        || (existingSummary.contains("正在") && !existingSummary.contains("请求失败"));
+                boolean failed = existingSummary.contains("❌")
+                        || existingSummary.contains("请求失败")
+                        || existingSummary.contains("分析失败")
+                        || existingSummary.contains("Model disabled");
+                if (inProgress && !failed) {
+                    return "任务已在后台运行，无需重复提交";
+                }
             }
 
             //更新状态
@@ -104,14 +115,45 @@ public class DebugController {
 
     //纯文字提取接口
     @GetMapping("/transcribe")
-    public String transcribe(@RequestParam Long id) {
-        MediaFile mediaFile = mediaFileMapper.selectById(id);
-        if (mediaFile == null) return "❌ 找不到文件记录";
+    public String transcribe(@RequestParam Long id,
+                             @RequestParam(value = "force", defaultValue = "false") boolean force) {
+        String lockKey = "lock:transcribe:" + id;
+        org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
 
-        // 调用异步服务
-        aiService.asyncTranscribe(id);
+        try {
+            if (!lock.tryLock(0, -1, TimeUnit.SECONDS)) {
+                return "⚠️ 提取任务提交中，请勿重复点击！";
+            }
 
-        return "✅ 提取任务已后台运行！请稍后查看结果。";
+            MediaFile mediaFile = mediaFileMapper.selectById(id);
+            if (mediaFile == null) return "❌ 找不到文件记录";
+
+            if (!force && aiService.isTranscribing(id)) {
+                return "⚠️ 提取任务已在后台运行，请勿重复提交";
+            }
+            if (!force && TranscriptStatusHelper.isReady(mediaFile)) {
+                return "✅ 已有完整转写结果，可直接查看；如需重做请点「重新提取」";
+            }
+
+            // 用 Redis 标记进行中，不覆盖已有 transcript_text（避免丢失已转写结果）
+            aiService.markTranscribing(id);
+            if (mediaFile.getUserId() != null) {
+                redisTemplate.delete("media:list:user:" + mediaFile.getUserId());
+            }
+
+            aiService.asyncTranscribe(id, force);
+
+            return force
+                    ? "✅ 已重新提交提取任务！长视频约需 30–90 分钟，请耐心等待。"
+                    : "✅ 提取任务已后台运行！长视频约需 30–90 分钟，请耐心等待。";
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "❌ 提交失败: " + e.getMessage();
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
     }
 
     //下载音频接口
@@ -149,6 +191,7 @@ public class DebugController {
     }
 
     private boolean runFfmpeg(String inputPath, String outputPath) {
+        Process process = null;
         try {
             List<String> command = new ArrayList<>();
             command.add("ffmpeg");
@@ -165,11 +208,58 @@ public class DebugController {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
             pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-            Process process = pb.start();
-            return process.waitFor(15, TimeUnit.MINUTES) && process.exitValue() == 0;
+            process = pb.start();
+
+            long durationMin = probeMediaDurationMinutes(inputPath);
+            long waitMinutes = Math.max(20, durationMin / 2 + 10);
+            if (durationMin >= 90) {
+                waitMinutes = Math.max(waitMinutes, durationMin + 15);
+            }
+
+            boolean finished = process.waitFor(waitMinutes, TimeUnit.MINUTES);
+            return finished && process.exitValue() == 0;
         } catch (Exception e) {
             e.printStackTrace();
             return false;
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    private long probeMediaDurationMinutes(String mediaPath) {
+        Process process = null;
+        try {
+            List<String> command = List.of(
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    mediaPath
+            );
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            process = pb.start();
+
+            String output;
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream()))) {
+                output = reader.readLine();
+            }
+
+            if (!process.waitFor(30, TimeUnit.SECONDS)
+                    || process.exitValue() != 0
+                    || output == null) {
+                return 15;
+            }
+            double seconds = Double.parseDouble(output.trim());
+            return Math.max(1, (long) Math.ceil(seconds / 60));
+        } catch (Exception e) {
+            return 15;
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
         }
     }
 }

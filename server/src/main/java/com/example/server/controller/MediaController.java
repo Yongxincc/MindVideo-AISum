@@ -3,6 +3,7 @@ package com.example.server.controller;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
+import com.example.server.service.AiService;
 import com.example.server.service.MediaService;
 import com.example.server.utils.MinioUtils;
 import com.example.server.utils.YtDlpUtils; //确保导入这个
@@ -41,6 +42,9 @@ public class MediaController {
 
     @Autowired
     private MediaService mediaService;
+
+    @Autowired
+    private AiService aiService;
 
     @PostMapping("/init-upload")
     public ResponseEntity<String> initUpload() {
@@ -144,7 +148,9 @@ public class MediaController {
             String json = redisTemplate.opsForValue().get(cacheKey);
             if (json != null) {
                 System.out.println("命中 Redis 缓存，直接返回！");
-                return objectMapper.readValue(json, new TypeReference<List<MediaFile>>(){});
+                List<MediaFile> cached = objectMapper.readValue(json, new TypeReference<List<MediaFile>>() {});
+                aiService.enrichTranscribingFlags(cached);
+                return cached;
             }
         } catch (Exception e) {
             System.err.println("Redis 读取失败: " + e.getMessage());
@@ -157,6 +163,7 @@ public class MediaController {
             return List.of();
         }
         List<MediaFile> list = mediaFileMapper.selectList(query.orderByDesc("id"));
+        aiService.enrichTranscribingFlags(list);
 
         try {
             String jsonToWrite = objectMapper.writeValueAsString(list);
@@ -194,5 +201,37 @@ public class MediaController {
         }
 
         return "删除成功";
+    }
+
+    @PostMapping("/rename")
+    public ResponseEntity<String> rename(@RequestParam("id") Long id,
+                                         @RequestParam("displayName") String displayName,
+                                         @RequestParam(value = "userId", required = false) Long userId) {
+        if (mediaFileMapper == null) {
+            return ResponseEntity.status(500).body("数据库未就绪");
+        }
+
+        MediaFile media = mediaFileMapper.selectById(id);
+        if (media == null) {
+            return ResponseEntity.badRequest().body("文件不存在");
+        }
+
+        if (userId != null && !userId.equals(media.getUserId())) {
+            return ResponseEntity.status(403).body("无权修改他人的文件");
+        }
+
+        String trimmed = displayName == null ? "" : displayName.trim();
+        if (trimmed.length() > 128) {
+            return ResponseEntity.badRequest().body("名称不能超过 128 个字符");
+        }
+
+        media.setDisplayName(trimmed.isEmpty() ? null : trimmed);
+        mediaFileMapper.updateById(media);
+
+        if (media.getUserId() != null) {
+            redisTemplate.delete("media:list:user:" + media.getUserId());
+        }
+
+        return ResponseEntity.ok("重命名成功");
     }
 }

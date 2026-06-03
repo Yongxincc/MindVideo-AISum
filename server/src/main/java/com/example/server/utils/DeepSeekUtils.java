@@ -3,6 +3,7 @@ package com.example.server.utils;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONException;
 import okhttp3.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -19,6 +20,12 @@ public class DeepSeekUtils {
     @Value("${ai.deepseek.base-url}")
     private String baseUrl;
 
+    @Value("${ai.deepseek.model}")
+    private String model;
+
+    /** 超长转写截断，避免超出模型上下文 */
+    private static final int MAX_INPUT_CHARS = 48_000;
+
     // 配置 HTTP 客户端，超时时间设置长一点，因为 AI 思考需要时间
 
     private static final OkHttpClient client = new OkHttpClient.Builder()
@@ -31,6 +38,8 @@ public class DeepSeekUtils {
      * 真·AI 深度思考
      */
     public String analyzeContent(String content) {
+        content = trimForModel(content);
+        System.out.println("🤖 [LLM] model=" + model + ", inputChars=" + content.length());
 
         String url = baseUrl + "/chat/completions";
         //提示词自由发挥，善于利用AI。
@@ -78,7 +87,7 @@ public class DeepSeekUtils {
 
         // 3. 组装 JSON 参数
         JSONObject jsonBody = new JSONObject();
-        jsonBody.put("model", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"); // 或者是 deepseek-ai/DeepSeek-R1 (看你账号支持哪个)
+        jsonBody.put("model", model);
         jsonBody.put("stream", false);
 
         JSONArray messages = new JSONArray();
@@ -101,23 +110,44 @@ public class DeepSeekUtils {
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                // 如果报错（比如没余额），这里会把错误原因返回去
-                return "❌ AI 请求失败: " + response.code() + " - " + response.body().string();
+                String errBody = response.body() != null ? response.body().string() : "";
+                System.err.println("❌ [LLM] model=" + model + " http=" + response.code() + " body=" + errBody);
+                return "❌ AI 请求失败: " + response.code() + " - " + errBody;
             }
 
-            // 5. 解析 AI 返回的 JSON
             String resultJson = response.body().string();
             JSONObject jsonObject = JSON.parseObject(resultJson);
+            JSONArray choices = jsonObject.getJSONArray("choices");
+            if (choices == null || choices.isEmpty()) {
+                System.err.println("❌ [LLM] 响应无 choices: " + resultJson);
+                return "❌ AI 响应格式异常: choices 为空";
+            }
+            JSONObject message = choices.getJSONObject(0).getJSONObject("message");
+            if (message == null) {
+                return "❌ AI 响应格式异常: message 为空";
+            }
+            String answer = message.getString("content");
+            if (answer == null || answer.isBlank()) {
+                return "❌ AI 返回内容为空";
+            }
+            return answer;
 
-            // 提取真正的回答内容
-            return jsonObject.getJSONArray("choices")
-                    .getJSONObject(0)
-                    .getJSONObject("message")
-                    .getString("content");
-
+        } catch (JSONException e) {
+            e.printStackTrace();
+            return "❌ AI 响应解析失败: " + e.getMessage();
         } catch (IOException e) {
             e.printStackTrace();
             return "❌ 网络连接出错: " + e.getMessage();
         }
+    }
+
+    private String trimForModel(String content) {
+        if (content == null) {
+            return "";
+        }
+        if (content.length() <= MAX_INPUT_CHARS) {
+            return content;
+        }
+        return content.substring(0, MAX_INPUT_CHARS) + "\n\n[... 转写文本过长，已截断后分析 ...]";
     }
 }

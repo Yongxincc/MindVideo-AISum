@@ -16,6 +16,7 @@ services:
     volumes:
       - ./mysql/data:/var/lib/mysql
       - ./mysql/logs:/var/log/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d
     networks:
       - my-network
 

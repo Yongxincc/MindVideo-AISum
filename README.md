@@ -79,9 +79,32 @@ SpringBoot + RocketMQ + Redis + MySQL + MyBatis Plus + MinIO + FFmpeg + LangChai
 
 **环境：** Docker、Java 21、Maven、Node.js 18+；视频处理需 FFmpeg，在线链接解析需 yt-dlp。
 
+### 一键启动（推荐）
+
+| 方式 | 说明 |
+|------|------|
+| 双击 `start-dev.bat` | 启动 Docker 中间件 + 新开两个窗口跑后端 / 前端 |
+| 双击 `start-apps.bat` | 仅启动后端 + 前端（中间件已在跑时用） |
+| `.\scripts\start-all.ps1` | 同上，PowerShell 里执行 |
+| `.\scripts\start-all.ps1 -SkipDocker` | 仅应用，不拉 Docker |
+
+首次使用前请复制并填写 `server/src/main/resources/application.properties`（见下方手动步骤）。
+
+### 只启动中间件
+
+```powershell
+# 启动 MySQL / Redis / MinIO / RocketMQ 并自动建表（需先打开 Docker Desktop）
+.\scripts\start-dev.ps1
+```
+
+### 手动分步
+
+或手动：
+
 ```bash
 # 1. 启动中间件（MySQL / Redis / MinIO / RocketMQ）
 docker-compose up -d
+.\scripts\init-db.ps1
 
 # 2. 配置后端：复制示例文件并填入本地密钥与工具路径
 cp server/src/main/resources/application.properties.example server/src/main/resources/application.properties
@@ -93,7 +116,7 @@ cd server && mvn spring-boot:run
 cd client && npm install && npm run dev
 ```
 
-浏览器访问 http://localhost:5173 。首次使用需在 MySQL `media_db` 中创建 `users`、`media_files` 表（字段见 `server/src/main/java/com/example/server/entity/`）。
+浏览器访问 http://localhost:5173 。`start-dev.ps1` / `init-db.ps1` 会自动创建 `users`、`media_files` 表。
 
 | 服务 | 地址 |
 |------|------|
