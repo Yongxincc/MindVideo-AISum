@@ -160,7 +160,11 @@ const sidebarRetryVisible = computed(() => {
     )
   }
   if (sidebar.value.type === 'ai') {
-    return isAiSummaryError(sidebar.value.content) || sidebar.value.content?.includes('##')
+    return (
+      isAiSummaryError(sidebar.value.content) ||
+      sidebar.value.content?.includes('##') ||
+      sidebar.value.content?.includes('已中断')
+    )
   }
   return false
 })
@@ -233,8 +237,8 @@ const onLogout = () => logout(() => {
   list.value = []
 })
 
-onMounted(() => {
-  initAuth()
+onMounted(async () => {
+  await initAuth()
   fetchList()
 })
 </script>

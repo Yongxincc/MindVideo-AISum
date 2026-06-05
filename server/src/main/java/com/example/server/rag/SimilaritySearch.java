@@ -40,9 +40,15 @@ public class SimilaritySearch {
         return dot / (Math.sqrt(na) * Math.sqrt(nb));
     }
 
+    /** @return null 表示 JSON 无效或为空向量 */
     public static float[] parseEmbedding(String json) {
-        if (json == null || json.isBlank()) return new float[0];
+        if (json == null || json.isBlank()) {
+            return null;
+        }
         List<Float> list = JSON.parseArray(json, Float.class);
+        if (list == null || list.isEmpty()) {
+            return null;
+        }
         float[] arr = new float[list.size()];
         for (int i = 0; i < list.size(); i++) {
             arr[i] = list.get(i);

@@ -6,6 +6,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONException;
 import okhttp3.*;
 import com.example.server.util.RetryHelper;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -28,13 +29,22 @@ public class DeepSeekUtils {
     @Value("${ai.deepseek.max-input-chars:200000}")
     private int maxInputChars;
 
-    // 配置 HTTP 客户端，超时时间设置长一点，因为 AI 思考需要时间
+    /** 长视频全文总结可能较慢，默认 15 分钟读超时 */
+    @Value("${ai.deepseek.read-timeout-seconds:900}")
+    private int readTimeoutSeconds;
 
-    private static final OkHttpClient client = new OkHttpClient.Builder()
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(300, TimeUnit.SECONDS)  // 给 AI 5分钟思考时间
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .build();
+    private OkHttpClient client;
+
+    @PostConstruct
+    void initClient() {
+        client = new OkHttpClient.Builder()
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
+                // 长转写 JSON 请求体较大，写超时与读超时对齐，避免上传阶段先超时
+                .writeTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
+                .build();
+        System.out.println("🤖 [LLM] OkHttp readTimeout=" + readTimeoutSeconds + "s maxInputChars=" + maxInputChars);
+    }
 
     /**
      * 真·AI 深度思考
@@ -61,9 +71,14 @@ public class DeepSeekUtils {
                     }
             );
             long elapsed = System.currentTimeMillis() - t0;
-            System.out.printf("🤖 [LLM] purpose=%s done elapsedMs=%d outputChars=%d charsPerSec=%.1f%n",
-                    purpose, elapsed, answer != null ? answer.length() : 0,
-                    elapsed > 0 && answer != null ? answer.length() * 1000.0 / elapsed : 0);
+            if (answer != null && answer.startsWith("❌")) {
+                System.err.printf("❌ [LLM] purpose=%s api-error elapsedMs=%d msg=%s%n",
+                        purpose, elapsed, answer.length() > 200 ? answer.substring(0, 200) + "..." : answer);
+            } else {
+                System.out.printf("🤖 [LLM] purpose=%s done elapsedMs=%d outputChars=%d charsPerSec=%.1f%n",
+                        purpose, elapsed, answer != null ? answer.length() : 0,
+                        elapsed > 0 && answer != null ? answer.length() * 1000.0 / elapsed : 0);
+            }
             return answer;
         } catch (Exception e) {
             e.printStackTrace();

@@ -1,6 +1,8 @@
 package com.example.server.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.example.server.auth.AuthContext;
+import com.example.server.auth.MediaAccessService;
 import com.example.server.dto.AskRequestDto;
 import com.example.server.dto.UploadResultDto;
 import com.example.server.entity.MediaFile;
@@ -70,8 +72,12 @@ public class MediaController {
     @Autowired
     private PipelineTraceService pipelineTrace;
 
+    @Autowired
+    private MediaAccessService mediaAccessService;
+
     @PostMapping("/init-upload")
     public ResponseEntity<String> initUpload() {
+        AuthContext.requireUserId();
         String uploadId = mediaService.initChunkedUpload();
         return ResponseEntity.ok(uploadId);
     }
@@ -82,6 +88,7 @@ public class MediaController {
             @RequestParam("chunkIndex") int chunkIndex,
             @RequestParam("totalChunks") int totalChunks,
             @RequestParam("file") MultipartFile chunk) {
+        AuthContext.requireUserId();
         try {
             mediaService.saveChunk(uploadId, chunkIndex, totalChunks, chunk);
             return ResponseEntity.ok("chunk ok");
@@ -92,14 +99,15 @@ public class MediaController {
 
     @GetMapping("/upload-status")
     public Map<String, Object> uploadStatus(@RequestParam("uploadId") String uploadId) {
+        AuthContext.requireUserId();
         return mediaService.getUploadStatus(uploadId);
     }
 
     @PostMapping("/merge-chunks")
     public ResponseEntity<Map<String, Object>> mergeChunks(
             @RequestParam("uploadId") String uploadId,
-            @RequestParam(value = "filename", required = false) String filename,
-            @RequestParam(value = "userId", required = false) Long userId) {
+            @RequestParam(value = "filename", required = false) String filename) {
+        Long userId = AuthContext.requireUserId();
         try {
             UploadResultDto result = mediaService.mergeChunks(uploadId, userId, filename);
             if (result.getMediaId() != null) {
@@ -121,8 +129,8 @@ public class MediaController {
     }
 
     @PostMapping("/upload")
-    public ResponseEntity<String> upload(@RequestParam("file") MultipartFile file,
-                                         @RequestParam(value = "userId", required = false) Long userId) {
+    public ResponseEntity<String> upload(@RequestParam("file") MultipartFile file) {
+        Long userId = AuthContext.requireUserId();
         if (file == null || file.isEmpty()) {
             return ResponseEntity.badRequest().body("Upload failed: file is empty");
         }
@@ -138,9 +146,7 @@ public class MediaController {
             mediaFile.setContentMd5(uploaded.getContentMd5());
             mediaFile.setStatus("COMPLETED");
             mediaFile.setUploadTime(LocalDateTime.now());
-            if (userId != null) {
-                mediaFile.setUserId(userId);
-            }
+            mediaFile.setUserId(userId);
 
             mediaFileMapper.insert(mediaFile);
             boolean reused = contentDedupService.tryReuseTranscript(mediaFile);
@@ -158,8 +164,8 @@ public class MediaController {
     }
 
     @PostMapping("/upload-url")
-    public ResponseEntity<String> uploadUrl(@RequestParam("url") String url,
-                                            @RequestParam(value = "userId", required = false) Long userId) {
+    public ResponseEntity<String> uploadUrl(@RequestParam("url") String url) {
+        Long userId = AuthContext.requireUserId();
         File tempFile = null;
         try {
             if (url == null || url.isBlank()) {
@@ -179,9 +185,7 @@ public class MediaController {
             mediaFile.setContentMd5(contentMd5);
             mediaFile.setStatus("COMPLETED");
             mediaFile.setUploadTime(LocalDateTime.now());
-            if (userId != null) {
-                mediaFile.setUserId(userId);
-            }
+            mediaFile.setUserId(userId);
 
             mediaFileMapper.insert(mediaFile);
             pipelineTrace.beginTask(mediaFile.getId(), "upload");
@@ -202,54 +206,35 @@ public class MediaController {
         }
     }
 
-    /** 提交异步 RAG 问答（立即返回，前端轮询 /ask-status） */
     @PostMapping("/ask")
     public ResponseEntity<AskStatusDto> ask(@RequestBody AskRequestDto request) {
+        Long userId = AuthContext.requireUserId();
         if (request.getMediaId() == null || request.getQuestion() == null || request.getQuestion().isBlank()) {
             return ResponseEntity.badRequest().build();
         }
-        MediaFile media = mediaFileMapper.selectById(request.getMediaId());
-        if (media == null) {
-            return ResponseEntity.notFound().build();
-        }
-        if (request.getUserId() != null && media.getUserId() != null
-                && !request.getUserId().equals(media.getUserId())) {
-            return ResponseEntity.status(403).build();
-        }
+        mediaAccessService.requireOwnedMedia(request.getMediaId(), userId);
         AskStatusDto status = ragAskService.submit(request.getMediaId(), request.getQuestion().trim());
         return ResponseEntity.accepted().body(status);
     }
 
     @GetMapping("/ask-status")
-    public ResponseEntity<AskStatusDto> askStatus(@RequestParam Long mediaId,
-                                                  @RequestParam(value = "userId", required = false) Long userId) {
-        MediaFile media = mediaFileMapper.selectById(mediaId);
-        if (media == null) {
-            return ResponseEntity.notFound().build();
-        }
-        if (userId != null && media.getUserId() != null && !userId.equals(media.getUserId())) {
-            return ResponseEntity.status(403).build();
-        }
+    public ResponseEntity<AskStatusDto> askStatus(@RequestParam Long mediaId) {
+        Long userId = AuthContext.requireUserId();
+        mediaAccessService.requireOwnedMedia(mediaId, userId);
         return ResponseEntity.ok(ragAskService.getStatus(mediaId));
     }
 
     @GetMapping("/ask-history")
-    public ResponseEntity<List<MediaQaMessageDto>> askHistory(@RequestParam Long mediaId,
-                                                              @RequestParam(value = "userId", required = false) Long userId) {
-        MediaFile media = mediaFileMapper.selectById(mediaId);
-        if (media == null) {
-            return ResponseEntity.notFound().build();
-        }
-        if (userId != null && media.getUserId() != null && !userId.equals(media.getUserId())) {
-            return ResponseEntity.status(403).build();
-        }
+    public ResponseEntity<List<MediaQaMessageDto>> askHistory(@RequestParam Long mediaId) {
+        Long userId = AuthContext.requireUserId();
+        mediaAccessService.requireOwnedMedia(mediaId, userId);
         return ResponseEntity.ok(mediaQaService.listHistory(mediaId));
     }
 
     @GetMapping("/list")
-    public List<MediaFile> getList(@RequestParam(value = "userId", required = false) Long userId,
-                                   @RequestParam(value = "_t", required = false) String cacheBuster) {
-        String cacheKey = "media:list:user:" + (userId == null ? "anon" : userId);
+    public List<MediaFile> getList(@RequestParam(value = "_t", required = false) String cacheBuster) {
+        Long userId = AuthContext.requireUserId();
+        String cacheKey = "media:list:user:" + userId;
         boolean useCache = cacheBuster == null || cacheBuster.isBlank();
 
         if (useCache) {
@@ -266,11 +251,7 @@ public class MediaController {
         }
 
         QueryWrapper<MediaFile> query = new QueryWrapper<>();
-        if (userId != null) {
-            query.eq("user_id", userId);
-        } else {
-            return List.of();
-        }
+        query.eq("user_id", userId);
         List<MediaFile> list = mediaFileMapper.selectList(query.orderByDesc("id"));
         aiService.enrichTranscribingFlags(list);
 
@@ -285,29 +266,26 @@ public class MediaController {
     }
 
     @DeleteMapping("/delete")
-    public String delete(@RequestParam("id") Long id,
-                         @RequestParam(value = "userId", required = false) Long userId) {
-
+    public String delete(@RequestParam("id") Long id) {
+        Long userId = AuthContext.requireUserId();
         MediaFile media = mediaFileMapper.selectById(id);
         if (media == null) return "文件不存在";
 
-        if (userId != null && !media.getUserId().equals(userId)) {
-            return "无权删除他人的文件";
-        }
+        mediaAccessService.requireOwner(media, userId);
 
         if (media.getFilePath() != null && media.getFilePath().startsWith("http")) {
             minioUtils.removeFile(media.getFilePath());
         }
 
         mediaFileMapper.deleteById(id);
-        invalidateListCache(media.getUserId());
+        invalidateListCache(userId);
         return "删除成功";
     }
 
     @PostMapping("/rename")
     public ResponseEntity<String> rename(@RequestParam("id") Long id,
-                                         @RequestParam("displayName") String displayName,
-                                         @RequestParam(value = "userId", required = false) Long userId) {
+                                         @RequestParam("displayName") String displayName) {
+        Long userId = AuthContext.requireUserId();
         if (mediaFileMapper == null) {
             return ResponseEntity.status(500).body("数据库未就绪");
         }
@@ -317,9 +295,7 @@ public class MediaController {
             return ResponseEntity.badRequest().body("文件不存在");
         }
 
-        if (userId != null && !userId.equals(media.getUserId())) {
-            return ResponseEntity.status(403).body("无权修改他人的文件");
-        }
+        mediaAccessService.requireOwner(media, userId);
 
         String trimmed = displayName == null ? "" : displayName.trim();
         if (trimmed.length() > 128) {
@@ -328,7 +304,7 @@ public class MediaController {
 
         media.setDisplayName(trimmed.isEmpty() ? null : trimmed);
         mediaFileMapper.updateById(media);
-        invalidateListCache(media.getUserId());
+        invalidateListCache(userId);
 
         return ResponseEntity.ok("重命名成功");
     }

@@ -14,6 +14,8 @@ import com.example.server.pipeline.PipelineStage;
 
 import com.example.server.pipeline.PipelineTraceContext;
 
+import com.example.server.dto.PipelineStatusDto;
+import com.example.server.util.AiSummaryStatusHelper;
 import com.example.server.util.TranscriptStatusHelper;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -224,14 +226,11 @@ public class AiService {
 
         try {
 
-            if (ragIndexService.indexTranscript(mediaId)) {
-
+            String indexErr = ragIndexService.indexTranscriptWithError(mediaId);
+            if (indexErr == null) {
                 System.out.println("📚 [RAG] 总结后已建立问答索引 mediaId=" + mediaId);
-
             } else {
-
-                System.out.println("⚠️ [RAG] 总结后索引跳过（无有效转写） mediaId=" + mediaId);
-
+                System.out.println("⚠️ [RAG] 总结后索引失败 mediaId=" + mediaId + ": " + indexErr);
             }
 
         } catch (Exception e) {
@@ -428,8 +427,31 @@ public class AiService {
 
             repairStaleProcessingStatus(file, inRedis);
 
+            repairStaleAiSummary(file);
+
         }
 
+    }
+
+    public boolean isAnalyzeActuallyRunning(Long mediaId) {
+        PipelineStatusDto pipeline = pipelineTrace.getStatus(mediaId);
+        return AiSummaryStatusHelper.isAnalyzeActuallyRunning(pipeline);
+    }
+
+    private void repairStaleAiSummary(MediaFile file) {
+        if (file.getId() == null || !AiSummaryStatusHelper.looksInProgress(file.getAiSummary())) {
+            return;
+        }
+        PipelineStatusDto pipeline = pipelineTrace.getStatus(file.getId());
+        if (!AiSummaryStatusHelper.isStaleInProgress(file.getAiSummary(), pipeline)) {
+            return;
+        }
+        String repaired = AiSummaryStatusHelper.staleFailureMessage();
+        System.out.println("⚠️ [总结状态修复] mediaId=" + file.getId()
+                + " 僵死进行中 -> 可重新提交");
+        file.setAiSummary(repaired);
+        mediaFileMapper.updateById(file);
+        clearListCache(file);
     }
 
 

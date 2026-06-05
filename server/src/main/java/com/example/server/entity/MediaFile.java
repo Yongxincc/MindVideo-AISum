@@ -35,6 +35,8 @@ public class MediaFile {
     private String contentMd5;
     /** RAG 向量索引完成时间 */
     private LocalDateTime ragIndexedAt;
+    /** 建立 RAG 索引时使用的 Embedding 模型名，用于检测模型变更后自动重建 */
+    private String ragEmbedModel;
 
     //【修改点】删掉了 @TableField(fill = ...) 注解
     //上传时间由数据库自动记录，Java 不插手，防止报错

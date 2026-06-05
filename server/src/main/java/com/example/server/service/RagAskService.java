@@ -85,7 +85,7 @@ public class RagAskService {
             save(mediaId, done);
             persistHistory(mediaId, question, done.getAnswer(), done.getCitations(), "OK");
         } catch (RagIndexException e) {
-            String errAnswer = "❌ " + e.getMessage();
+            String errAnswer = e.getMessage().startsWith("❌") ? e.getMessage() : "❌ " + e.getMessage();
             save(mediaId, new AskStatusDto("FAILED", errAnswer, List.of(), e.getMessage()));
             persistHistory(mediaId, question, errAnswer, List.of(), "FAILED");
         } catch (Exception e) {

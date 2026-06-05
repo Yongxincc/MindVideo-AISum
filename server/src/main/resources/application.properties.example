@@ -1,5 +1,9 @@
 server.port=9090
 
+# JWT 鉴权（生产环境请改为足够长的随机字符串，勿提交真实密钥）
+auth.jwt.secret=CHANGE_ME_TO_A_LONG_RANDOM_SECRET
+auth.jwt.expire-days=7
+
 # 数据库配置（请按本地环境修改）
 spring.datasource.url=jdbc:mysql://localhost:3307/media_db?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf-8&allowPublicKeyRetrieval=true
 spring.datasource.username=root
@@ -21,15 +25,20 @@ ai.deepseek.base-url=https://api.siliconflow.cn/v1
 ai.deepseek.model=deepseek-ai/DeepSeek-V3
 # 总结/问答单次送入模型的最大字符数（长上下文模型可增大，如 200000）
 ai.deepseek.max-input-chars=200000
+ai.deepseek.read-timeout-seconds=900
 ai.aliyun.api-key=YOUR_ALIYUN_API_KEY
 
 # ASR 单段最长秒数（SiliconFlow 限制 1 小时，默认 3300 = 55 分钟）
 asr.max-segment-seconds=3300
 
 # RAG（Embedding + 检索）
-ai.embedding.model=BAAI/bge-large-zh-v1.5
-rag.chunk.size=300
-rag.chunk.overlap=40
+# bge-large-zh-v1.5 约 512 token/条；长切片用 BAAI/bge-m3 并配合 ai.embedding.max-input-chars
+ai.embedding.model=BAAI/bge-m3
+ai.embedding.max-input-chars=1500
+# bge-large 检索 query 前缀；留空则 bge-large 自动加中文前缀，bge-m3 无需前缀
+# ai.embedding.query-prefix=
+rag.chunk.size=500
+rag.chunk.overlap=80
 rag.retrieve.top-k=8
 rag.embed.batch-size=8
 rag.qa.history-limit=100

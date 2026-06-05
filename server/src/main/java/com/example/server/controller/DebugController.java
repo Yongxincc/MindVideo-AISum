@@ -1,5 +1,7 @@
 package com.example.server.controller;
 
+import com.example.server.auth.AuthContext;
+import com.example.server.auth.MediaAccessService;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
@@ -60,9 +62,14 @@ public class DebugController {
     @Autowired
     private PipelineTraceService pipelineTrace;
 
+    @Autowired
+    private MediaAccessService mediaAccessService;
+
     /** 查询媒体处理流水线各阶段耗时与当前进度（Redis，供前端轮询） */
     @GetMapping("/pipeline")
     public PipelineStatusDto pipelineStatus(@RequestParam Long id) {
+        Long userId = AuthContext.requireUserId();
+        mediaAccessService.requireOwnedMedia(id, userId);
         PipelineStatusDto status = pipelineTrace.getStatus(id);
         return status != null ? status : new PipelineStatusDto();
     }
@@ -71,7 +78,8 @@ public class DebugController {
     @GetMapping("/ai")
     public String aiAnalyze(@RequestParam Long id,
                             @RequestParam(value = "force", defaultValue = "false") boolean force) {
-        MediaFile fileForLock = mediaFileMapper.selectById(id);
+        Long userId = AuthContext.requireUserId();
+        MediaFile fileForLock = mediaAccessService.requireOwnedMedia(id, userId);
         String lockKey = contentDedupService.resolveLockKey(fileForLock, "lock:analyze:" + id);
         org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
 
@@ -96,14 +104,11 @@ public class DebugController {
             if (file == null) return "文件不存在";
             String existingSummary = file.getAiSummary();
             if (!force && existingSummary != null) {
-                boolean inProgress = existingSummary.contains("正在分析")
-                        || existingSummary.contains("[MQ]")
-                        || (existingSummary.contains("正在") && !existingSummary.contains("请求失败"));
                 boolean failed = existingSummary.contains("❌")
                         || existingSummary.contains("请求失败")
                         || existingSummary.contains("分析失败")
                         || existingSummary.contains("Model disabled");
-                if (inProgress && !failed) {
+                if (!failed && aiService.isAnalyzeActuallyRunning(id)) {
                     return "任务已在后台运行，无需重复提交";
                 }
             }
@@ -138,7 +143,8 @@ public class DebugController {
     @GetMapping("/transcribe")
     public String transcribe(@RequestParam Long id,
                              @RequestParam(value = "force", defaultValue = "false") boolean force) {
-        MediaFile mediaFile = mediaFileMapper.selectById(id);
+        Long userId = AuthContext.requireUserId();
+        MediaFile mediaFile = mediaAccessService.requireOwnedMedia(id, userId);
         String lockKey = contentDedupService.resolveLockKey(mediaFile, "lock:transcribe:" + id);
         org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
 
@@ -181,8 +187,8 @@ public class DebugController {
     //下载音频接口
     @GetMapping("/download")
     public ResponseEntity<Resource> download(@RequestParam Long id) throws IOException {
-        MediaFile mediaFile = mediaFileMapper.selectById(id);
-        if (mediaFile == null) return ResponseEntity.notFound().build();
+        Long userId = AuthContext.requireUserId();
+        MediaFile mediaFile = mediaAccessService.requireOwnedMedia(id, userId);
 
         String inputPath = mediaFile.getFilePath();
 

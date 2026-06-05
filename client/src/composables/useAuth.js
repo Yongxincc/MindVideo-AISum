@@ -1,6 +1,12 @@
 import { ref } from 'vue'
 import { useApi } from './useApi'
 import { useToast } from './useToast'
+import {
+  clearAuthSession,
+  getAuthToken,
+  setAuthToken,
+  setUnauthorizedHandler,
+} from '../utils/authSession'
 
 const currentUser = ref(null)
 const showAuthModal = ref(false)
@@ -29,6 +35,17 @@ export function useAuth() {
     authMessage.value = ''
   }
 
+  const clearSession = () => {
+    currentUser.value = null
+    clearAuthSession()
+  }
+
+  setUnauthorizedHandler(() => {
+    clearSession()
+    toastError('登录已过期，请重新登录')
+    openAuthModal()
+  })
+
   const handleAuth = async (onLoginSuccess) => {
     if (!authForm.value.username || !authForm.value.password) {
       authMessage.value = '请输入完整的账号和密码'
@@ -51,6 +68,7 @@ export function useAuth() {
       if (ok && data.code === 200) {
         if (authMode.value === 'login') {
           currentUser.value = data.userInfo
+          setAuthToken(data.token)
           localStorage.setItem('user', JSON.stringify(data.userInfo))
           closeAuthModal()
           success(`欢迎回来，${data.userInfo.nickname}`)
@@ -73,14 +91,13 @@ export function useAuth() {
   }
 
   const logout = (onLogout) => {
-    currentUser.value = null
-    localStorage.removeItem('user')
+    clearSession()
     onLogout?.()
     success('已退出系统')
   }
 
   const requireAuth = () => {
-    if (!currentUser.value) {
+    if (!currentUser.value || !getAuthToken()) {
       toastError('请先登录后再操作')
       openAuthModal()
       return false
@@ -88,14 +105,25 @@ export function useAuth() {
     return true
   }
 
-  const initAuth = () => {
+  const initAuth = async () => {
     const savedUser = localStorage.getItem('user')
-    if (savedUser) {
-      try {
-        currentUser.value = JSON.parse(savedUser)
-      } catch {
-        localStorage.removeItem('user')
+    const token = getAuthToken()
+    if (!savedUser || !token) {
+      clearSession()
+      return
+    }
+
+    try {
+      currentUser.value = JSON.parse(savedUser)
+      const { ok, data } = await fetchJson('/user/me')
+      if (ok && data.code === 200) {
+        currentUser.value = data.userInfo
+        localStorage.setItem('user', JSON.stringify(data.userInfo))
+        return
       }
+      clearSession()
+    } catch {
+      clearSession()
     }
   }
 

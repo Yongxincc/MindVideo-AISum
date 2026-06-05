@@ -38,6 +38,8 @@ import java.util.List;
 
 import java.util.Map;
 
+import java.util.Objects;
+
 
 
 @Service
@@ -108,6 +110,12 @@ public class RagIndexService {
 
         }
 
+        if (!Objects.equals(media.getRagEmbedModel(), embeddingClient.getModel())) {
+
+            return false;
+
+        }
+
         QueryWrapper<TranscriptChunk> q = new QueryWrapper<>();
 
         q.eq("media_id", mediaId);
@@ -146,12 +154,9 @@ public class RagIndexService {
 
         }
 
-        if (!indexTranscript(mediaId)) {
-
-            throw new RagIndexException(
-
-                    "RAG 向量索引失败，请检查 Embedding API（ai.embedding.model / API Key）后重试");
-
+        String indexError = indexTranscriptWithError(mediaId);
+        if (indexError != null) {
+            throw new RagIndexException(indexError);
         }
 
     }
@@ -159,116 +164,82 @@ public class RagIndexService {
 
 
     /** @return true 表示索引成功 */
-
     public boolean indexTranscript(Long mediaId) {
+        return indexTranscriptWithError(mediaId) == null;
+    }
 
+    /** @return null 表示成功，否则为可读错误信息 */
+    public String indexTranscriptWithError(Long mediaId) {
         MediaFile media = mediaFileMapper.selectById(mediaId);
-
         if (media == null || !TranscriptStatusHelper.isReady(media)) {
-
-            return false;
-
+            return "转写尚未完成，无法建立 RAG 索引";
         }
-
         String text = media.getTranscriptText();
-
         if (text == null || text.isBlank() || text.startsWith("❌")) {
-
-            return false;
-
+            return "无有效转写文本，无法建立 RAG 索引";
         }
-
-
 
         deleteChunks(mediaId);
-
         clearRagIndexedAt(mediaId);
 
-
-
         List<ChunkSlice> slices = textChunker.chunk(text);
-
         if (slices.isEmpty()) {
-
-            return false;
-
+            return "转写切片为空，无法建立 RAG 索引";
         }
 
-
-
         long indexStart = System.currentTimeMillis();
-
         pipelineTrace.stageStart(mediaId, PipelineStage.RAG_INDEX,
-
-                "切片数=" + slices.size() + ", 转写字数=" + text.length());
+                "切片数=" + slices.size() + ", 转写字数=" + text.length()
+                        + ", embedModel=" + embeddingClient.getModel());
 
         try {
-
-            List<String> contents = slices.stream().map(ChunkSlice::getContent).toList();
-
+            List<String> contents = slices.stream()
+                    .map(s -> embeddingClient.prepareText(s.getContent()))
+                    .toList();
             List<float[]> vectors = embedInBatches(mediaId, contents);
 
-
-
             for (int i = 0; i < slices.size(); i++) {
-
                 ChunkSlice slice = slices.get(i);
-
                 TranscriptChunk row = new TranscriptChunk();
-
                 row.setMediaId(mediaId);
-
                 row.setChunkIndex(slice.getIndex());
-
-                row.setContent(slice.getContent());
-
+                row.setContent(contents.get(i));
                 row.setStartOffset(slice.getStartOffset());
-
                 row.setEndOffset(slice.getEndOffset());
-
                 row.setEmbedding(SimilaritySearch.toJson(vectors.get(i)));
-
                 chunkMapper.insert(row);
-
             }
 
-
-
             media.setRagIndexedAt(LocalDateTime.now());
-
+            media.setRagEmbedModel(embeddingClient.getModel());
             mediaFileMapper.updateById(media);
 
             long elapsed = System.currentTimeMillis() - indexStart;
-
             pipelineTrace.stageEnd(mediaId, PipelineStage.RAG_INDEX, true, "索引完成",
-
                     PipelineTraceService.metrics("chunks", slices.size(), "elapsedMs", elapsed));
-
             System.out.println("📚 [RAG] indexed mediaId=" + mediaId + " chunks=" + slices.size()
-
                     + " elapsedMs=" + elapsed);
-
-            return true;
-
+            return null;
         } catch (Exception e) {
-
             e.printStackTrace();
-
             deleteChunks(mediaId);
-
             clearRagIndexedAt(mediaId);
-
-            pipelineTrace.stageEnd(mediaId, PipelineStage.RAG_INDEX, false, e.getMessage(), null);
-
-            System.err.println("❌ [RAG] index failed mediaId=" + mediaId + ": " + e.getMessage());
-
-            return false;
-
+            String detail = formatIndexError(e);
+            pipelineTrace.stageEnd(mediaId, PipelineStage.RAG_INDEX, false, detail, null);
+            System.err.println("❌ [RAG] index failed mediaId=" + mediaId + ": " + detail);
+            return detail;
         }
-
     }
 
-
+    private static String formatIndexError(Exception e) {
+        String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        if (msg.contains("HTTP 400") || msg.contains("20015") || msg.contains("invalid")) {
+            return "RAG 向量索引失败：Embedding 单条输入超过模型 token 上限。"
+                    + "请确认 ai.embedding.model=BAAI/bge-m3 并已重启服务；"
+                    + "若使用 bge-large 请将 rag.chunk.size 设为 ≤300。详情: " + msg;
+        }
+        return "RAG 向量索引失败，请检查 Embedding API（ai.embedding.model / API Key）后重试。详情: " + msg;
+    }
 
     public void copyIndexFrom(Long sourceMediaId, Long targetMediaId) {
 
@@ -312,9 +283,13 @@ public class RagIndexService {
 
         MediaFile target = mediaFileMapper.selectById(targetMediaId);
 
+        MediaFile sourceMedia = mediaFileMapper.selectById(sourceMediaId);
+
         if (target != null) {
 
             target.setRagIndexedAt(LocalDateTime.now());
+
+            target.setRagEmbedModel(sourceMedia != null ? sourceMedia.getRagEmbedModel() : null);
 
             mediaFileMapper.updateById(target);
 
@@ -350,7 +325,7 @@ public class RagIndexService {
 
         long t0 = System.currentTimeMillis();
 
-        float[] queryVec = embeddingClient.embed(queryText);
+        float[] queryVec = embeddingClient.embedQuery(queryText);
 
         List<ScoredChunk> hits = similaritySearch.topK(loaded.vectors(), loaded.contents(), queryVec, topK);
 
@@ -402,7 +377,7 @@ public class RagIndexService {
 
             if (query == null || query.isBlank()) continue;
 
-            float[] queryVec = embeddingClient.embed(query.trim());
+            float[] queryVec = embeddingClient.embedQuery(query.trim());
 
             List<ScoredChunk> hits = similaritySearch.topK(
 
@@ -462,9 +437,39 @@ public class RagIndexService {
 
         List<String> contents = new ArrayList<>();
 
+        int expectedDim = -1;
+
         for (TranscriptChunk row : rows) {
 
-            vectors.add(SimilaritySearch.parseEmbedding(row.getEmbedding()));
+            float[] vec = SimilaritySearch.parseEmbedding(row.getEmbedding());
+
+            if (vec == null || vec.length == 0) {
+
+                System.err.println("⚠️ [RAG] skip invalid embedding mediaId=" + mediaId
+
+                        + " chunkIndex=" + row.getChunkIndex());
+
+                continue;
+
+            }
+
+            if (expectedDim < 0) {
+
+                expectedDim = vec.length;
+
+            } else if (vec.length != expectedDim) {
+
+                System.err.println("⚠️ [RAG] skip dim mismatch mediaId=" + mediaId
+
+                        + " chunkIndex=" + row.getChunkIndex()
+
+                        + " expected=" + expectedDim + " got=" + vec.length);
+
+                continue;
+
+            }
+
+            vectors.add(vec);
 
             contents.add(row.getContent());
 
@@ -514,9 +519,11 @@ public class RagIndexService {
 
         MediaFile media = mediaFileMapper.selectById(mediaId);
 
-        if (media != null && media.getRagIndexedAt() != null) {
+        if (media != null && (media.getRagIndexedAt() != null || media.getRagEmbedModel() != null)) {
 
             media.setRagIndexedAt(null);
+
+            media.setRagEmbedModel(null);
 
             mediaFileMapper.updateById(media);
 

@@ -2,6 +2,7 @@ import { ref, computed, watch } from 'vue'
 import { useApi } from './useApi'
 import { useToast } from './useToast'
 import { getTaskTitle } from '../utils/format.js'
+import { getAuthToken } from '../utils/authSession'
 
 const CHUNK_THRESHOLD_BYTES = 50 * 1024 * 1024
 const CHUNK_SIZE_BYTES = 5 * 1024 * 1024
@@ -79,15 +80,14 @@ export function useMediaTasks(getUserId) {
   })
 
   const fetchList = async () => {
-    const userId = getUserId()
-    if (!userId) {
+    if (!getUserId() || !getAuthToken()) {
       list.value = []
       return
     }
 
     try {
       const timestamp = Date.now()
-      const { ok, data } = await fetchJson(`/media/list?userId=${userId}&_t=${timestamp}`)
+      const { ok, data } = await fetchJson(`/media/list?_t=${timestamp}`)
       if (ok && Array.isArray(data)) {
         list.value = data.reverse()
       }
@@ -154,8 +154,6 @@ export function useMediaTasks(getUserId) {
       const mergeData = new FormData()
       mergeData.append('uploadId', uploadId)
       mergeData.append('filename', file.name)
-      const userId = getUserId()
-      if (userId) mergeData.append('userId', userId)
 
       const mergeRes = await fetchJson('/media/merge-chunks', { method: 'POST', body: mergeData })
       if (!mergeRes.ok) throw new Error(mergeRes.data?.message || 'merge failed')
@@ -200,8 +198,6 @@ export function useMediaTasks(getUserId) {
 
     const formData = new FormData()
     formData.append('file', file)
-    const userId = getUserId()
-    if (userId) formData.append('userId', userId)
 
     try {
       const { ok, text } = await uploadFormData('/media/upload', formData, ({ loaded, total, percent }) => {
@@ -271,8 +267,6 @@ export function useMediaTasks(getUserId) {
 
     const formData = new FormData()
     formData.append('url', url)
-    const userId = getUserId()
-    if (userId) formData.append('userId', userId)
 
     try {
       const { ok, text } = await fetchText('/media/upload-url', { method: 'POST', body: formData })
@@ -300,10 +294,8 @@ export function useMediaTasks(getUserId) {
     }
 
     try {
-      const userId = getUserId()
       const formData = new FormData()
       formData.append('displayName', trimmed)
-      if (userId) formData.append('userId', userId)
 
       const { ok, text } = await fetchText(`/media/rename?id=${item.id}`, {
         method: 'POST',
@@ -333,11 +325,7 @@ export function useMediaTasks(getUserId) {
 
   const deleteItem = async (item) => {
     try {
-      const userId = getUserId()
-      let path = `/media/delete?id=${item.id}`
-      if (userId) path += `&userId=${userId}`
-
-      const { ok, text } = await fetchText(path, { method: 'DELETE' })
+      const { ok, text } = await fetchText(`/media/delete?id=${item.id}`, { method: 'DELETE' })
       if (ok && text === '删除成功') {
         success('文件已删除')
         list.value = list.value.filter((i) => i.id !== item.id)
@@ -442,6 +430,22 @@ export function useMediaTasks(getUserId) {
     )
   }
 
+  const STALE_PIPELINE_MS = 15 * 60 * 1000
+
+  const isAiSummaryStaleProgress = async (id, summary) => {
+    if (!isAiSummaryInProgress(summary)) return false
+    const pipeline = await fetchPipelineStatus(id)
+    if (!pipeline) return true
+    const running =
+      !!pipeline.currentStage ||
+      pipeline.stages?.some((s) => s.status === 'running')
+    if (!running) return true
+    if (pipeline.updatedAt && Date.now() - pipeline.updatedAt > STALE_PIPELINE_MS) {
+      return true
+    }
+    return false
+  }
+
   const isAiSummaryTerminal = (summary) => {
     if (!summary || summary.length < 8) return false
     if (isAiSummaryInProgress(summary)) return false
@@ -479,10 +483,8 @@ export function useMediaTasks(getUserId) {
       return
     }
     try {
-      const userId = getUserId()
-      const uid = userId != null ? `&userId=${userId}` : ''
       const { ok, data } = await fetchJson(
-        `/media/ask-history?mediaId=${mediaId}${uid}&_t=${Date.now()}`
+        `/media/ask-history?mediaId=${mediaId}&_t=${Date.now()}`
       )
       qaState.value.history = ok && Array.isArray(data) ? data : []
     } catch {
@@ -517,11 +519,10 @@ export function useMediaTasks(getUserId) {
     }
   }
 
-  const pollAskStatus = async (mediaId, userId, maxAttempts = 120) => {
+  const pollAskStatus = async (mediaId, maxAttempts = 120) => {
     for (let i = 0; i < maxAttempts; i++) {
-      const uid = userId != null ? `&userId=${userId}` : ''
       const { ok, data } = await fetchJson(
-        `/media/ask-status?mediaId=${mediaId}${uid}&_t=${Date.now()}`
+        `/media/ask-status?mediaId=${mediaId}&_t=${Date.now()}`
       )
       if (!ok) throw new Error(data?.message || '查询问答状态失败')
       const status = data?.status
@@ -549,14 +550,13 @@ export function useMediaTasks(getUserId) {
     qaState.value.citations = []
 
     try {
-      const userId = getUserId()
       const { ok, status, data } = await fetchJson('/media/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mediaId, question, userId }),
+        body: JSON.stringify({ mediaId, question }),
       })
       if (!ok && status !== 202) throw new Error(data?.message || '问答提交失败')
-      const result = await pollAskStatus(mediaId, userId)
+      const result = await pollAskStatus(mediaId)
       qaState.value.question = ''
       qaState.value.answer = ''
       qaState.value.citations = []
@@ -628,7 +628,7 @@ export function useMediaTasks(getUserId) {
           isAiSummaryInProgress(text)
         ) {
           sidebar.value.content =
-            text + '\n\n(AI 分析中，长视频约需 1–5 分钟，请勿关闭页面…)'
+            text + '\n\n(AI 分析中，长视频约需 5–15 分钟，请勿关闭页面…)'
         }
       } else if (type === 'text') {
         if (item.transcribing || getTranscriptStatus(item) === TRANSCRIPT_STATUS.PROCESSING) {
@@ -778,41 +778,49 @@ export function useMediaTasks(getUserId) {
   }
 
   const aiAnalyze = async (id, forceRetry = false) => {
+    let retry = forceRetry
     const item = list.value.find((i) => i.id === id)
     sidebar.value.mediaId = id
 
-    if (!forceRetry && item && isAiSummarySuccess(item.aiSummary)) {
+    if (!retry && item && isAiSummarySuccess(item.aiSummary)) {
       openSidebar('ai', 'AI 智能总结')
       sidebar.value.content = item.aiSummary
       sidebar.value.loading = false
       return
     }
 
-    if (!forceRetry && item && isAiSummaryError(item.aiSummary)) {
+    if (!retry && item && isAiSummaryError(item.aiSummary)) {
       info('上次分析失败，正在重新提交...')
+      retry = true
     }
 
     if (
-      !forceRetry &&
+      !retry &&
       item &&
       isAiSummaryInProgress(item.aiSummary) &&
       !isAiSummaryError(item.aiSummary)
     ) {
-      openSidebar('ai', 'AI 智能总结')
-      sidebar.value.loading = true
-      sidebar.value.content =
-        item.aiSummary + '\n\n(任务进行中，请稍候…长视频约需 1–5 分钟)'
-      if (pollingTimers.value[id]?.type !== 'ai') {
-        startPolling(id, 'ai')
+      const stale = await isAiSummaryStaleProgress(id, item.aiSummary)
+      if (stale) {
+        info('检测到上次分析已中断，正在重新提交...')
+        retry = true
       } else {
-        fetchPipelineStatus(id).then((p) => {
-          if (p) sidebar.value.pipeline = p
-        })
+        openSidebar('ai', 'AI 智能总结')
+        sidebar.value.loading = true
+        sidebar.value.content =
+          item.aiSummary + '\n\n(任务进行中，请稍候…长视频约需 5–15 分钟)'
+        if (pollingTimers.value[id]?.type !== 'ai') {
+          startPolling(id, 'ai')
+        } else {
+          fetchPipelineStatus(id).then((p) => {
+            if (p) sidebar.value.pipeline = p
+          })
+        }
+        return
       }
-      return
     }
 
-    if (!forceRetry && pollingTimers.value[id]?.type === 'ai') {
+    if (!retry && pollingTimers.value[id]?.type === 'ai') {
       openSidebar('ai', 'AI 智能总结')
       sidebar.value.loading = true
       sidebar.value.content = '系统正在后台计算中...\n\n(任务正在进行，无需重复提交)'
@@ -821,14 +829,13 @@ export function useMediaTasks(getUserId) {
 
     openSidebar('ai', 'AI 智能总结')
     sidebar.value.loading = true
-    sidebar.value.content =
-      forceRetry || (item && isAiSummaryError(item.aiSummary))
+    sidebar.value.content = retry
         ? '正在重新提交 AI 分析...'
         : '正在向集群请求计算资源...'
     setLoadingAction(id, 'ai', true)
 
     try {
-      const aiPath = forceRetry
+      const aiPath = retry
         ? `/debug/ai?id=${id}&force=true`
         : `/debug/ai?id=${id}`
       const { ok, text } = await fetchText(aiPath)

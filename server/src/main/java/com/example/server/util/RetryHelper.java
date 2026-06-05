@@ -50,9 +50,13 @@ public final class RetryHelper {
 
     public static boolean isRetryableHttpOrNetwork(Exception e) {
         String msg = e.getMessage() != null ? e.getMessage() : "";
+        if (msg.contains("HTTP 400") || msg.contains("20015")) {
+            return false;
+        }
         return e instanceof java.io.IOException
                 || msg.contains("timeout")
                 || msg.contains("Timeout")
+                || msg.contains("HTTP 429")
                 || msg.contains("HTTP 5");
     }
 }
