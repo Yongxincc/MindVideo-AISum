@@ -3,7 +3,11 @@ package com.example.server.controller;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
+import com.example.server.dto.PipelineStatusDto;
+import com.example.server.pipeline.PipelineStage;
 import com.example.server.service.AiService;
+import com.example.server.service.ContentDedupService;
+import com.example.server.service.PipelineTraceService;
 import com.example.server.util.TranscriptStatusHelper;
 import com.example.server.strategy.AiAnalysisStrategy;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,18 +54,31 @@ public class DebugController {
     @Autowired
     private org.redisson.api.RedissonClient redissonClient;
 
+    @Autowired
+    private ContentDedupService contentDedupService;
+
+    @Autowired
+    private PipelineTraceService pipelineTrace;
+
+    /** 查询媒体处理流水线各阶段耗时与当前进度（Redis，供前端轮询） */
+    @GetMapping("/pipeline")
+    public PipelineStatusDto pipelineStatus(@RequestParam Long id) {
+        PipelineStatusDto status = pipelineTrace.getStatus(id);
+        return status != null ? status : new PipelineStatusDto();
+    }
+
     //AI总结接口(分布式锁 + 限流 + MQ)
     @GetMapping("/ai")
-    public String aiAnalyze(@RequestParam Long id) {
-        //【Redisson 分布式锁】防瞬时并发连点
-        String lockKey = "lock:analyze:" + id;
+    public String aiAnalyze(@RequestParam Long id,
+                            @RequestParam(value = "force", defaultValue = "false") boolean force) {
+        MediaFile fileForLock = mediaFileMapper.selectById(id);
+        String lockKey = contentDedupService.resolveLockKey(fileForLock, "lock:analyze:" + id);
         org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
 
         try {
             if (!lock.tryLock(0, -1, TimeUnit.SECONDS)) {
                 return "⚠️ 任务提交中，请勿重复点击！";
             }
-
 
             // 这里演示：全局限制每分钟只能分析 10 次 (防止费用爆炸)
             String limitKey = "limit:ai:global";
@@ -78,7 +95,7 @@ public class DebugController {
             MediaFile file = mediaFileMapper.selectById(id);
             if (file == null) return "文件不存在";
             String existingSummary = file.getAiSummary();
-            if (existingSummary != null) {
+            if (!force && existingSummary != null) {
                 boolean inProgress = existingSummary.contains("正在分析")
                         || existingSummary.contains("[MQ]")
                         || (existingSummary.contains("正在") && !existingSummary.contains("请求失败"));
@@ -91,6 +108,9 @@ public class DebugController {
                 }
             }
 
+            pipelineTrace.beginTask(id, "analyze");
+            pipelineTrace.stageStart(id, PipelineStage.MQ_DISPATCH, "投递 video-analysis-topic");
+
             //更新状态
             file.setAiSummary("[MQ] 已进入消息队列，等待调度...");
             mediaFileMapper.updateById(file);
@@ -100,6 +120,7 @@ public class DebugController {
             //发送消息
             AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS");
             rocketMQTemplate.convertAndSend("video-analysis-topic", msg);
+            pipelineTrace.stageEnd(id, PipelineStage.MQ_DISPATCH, true, "已投递 RocketMQ", null);
 
             return "✅ 任务已投递至 RocketMQ！";
 
@@ -117,7 +138,8 @@ public class DebugController {
     @GetMapping("/transcribe")
     public String transcribe(@RequestParam Long id,
                              @RequestParam(value = "force", defaultValue = "false") boolean force) {
-        String lockKey = "lock:transcribe:" + id;
+        MediaFile mediaFile = mediaFileMapper.selectById(id);
+        String lockKey = contentDedupService.resolveLockKey(mediaFile, "lock:transcribe:" + id);
         org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
 
         try {
@@ -125,7 +147,6 @@ public class DebugController {
                 return "⚠️ 提取任务提交中，请勿重复点击！";
             }
 
-            MediaFile mediaFile = mediaFileMapper.selectById(id);
             if (mediaFile == null) return "❌ 找不到文件记录";
 
             if (!force && aiService.isTranscribing(id)) {
@@ -136,6 +157,7 @@ public class DebugController {
             }
 
             // 用 Redis 标记进行中，不覆盖已有 transcript_text（避免丢失已转写结果）
+            pipelineTrace.beginTask(id, "transcribe");
             aiService.markTranscribing(id);
             if (mediaFile.getUserId() != null) {
                 redisTemplate.delete("media:list:user:" + mediaFile.getUserId());

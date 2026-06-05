@@ -1,5 +1,8 @@
 package com.example.server.utils;
 
+import com.example.server.pipeline.PipelineStage;
+import com.example.server.service.PipelineTraceService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -19,12 +22,17 @@ public class YtDlpUtils {
     @Value("${tool.ffmpeg.dir}")
     private String ffmpegDir;
 
+    @Autowired
+    private PipelineTraceService pipelineTrace;
+
     public File downloadVideo(String url) throws Exception {
         String tempDir = System.getProperty("java.io.tmpdir");
         String outputName = UUID.randomUUID().toString() + ".mp4";
         String outputPath = tempDir + File.separator + outputName;
 
         System.out.println("⬇️ [yt-dlp] 开始下载 (智能模式): " + url);
+        pipelineTrace.stageStart(PipelineStage.VIDEO_DOWNLOAD, url);
+        long downloadStart = System.currentTimeMillis();
 
         List<String> command = new ArrayList<>();
         command.add(ytDlpPath);
@@ -72,17 +80,29 @@ public class YtDlpUtils {
         }
 
         int exitCode = process.waitFor();
+        long elapsed = System.currentTimeMillis() - downloadStart;
         if (exitCode != 0) {
-            //如果还是失败抛出异常，前端会显示红色报错
+            pipelineTrace.stageEnd(PipelineStage.VIDEO_DOWNLOAD, false,
+                    "exitCode=" + exitCode, PipelineTraceService.metrics("elapsedMs", elapsed));
             throw new RuntimeException("yt-dlp 下载失败: " + logs.toString());
         }
 
         File downloadedFile = new File(outputPath);
         if (!downloadedFile.exists()) {
+            pipelineTrace.stageEnd(PipelineStage.VIDEO_DOWNLOAD, false, "文件未生成",
+                    PipelineTraceService.metrics("elapsedMs", elapsed));
             throw new RuntimeException("下载显示成功但文件未生成");
         }
 
-        System.out.println("✅ [yt-dlp] 下载完成: " + (downloadedFile.length() / 1024) + "KB");
+        long sizeKb = downloadedFile.length() / 1024;
+        double mbPerSec = elapsed > 0 ? (downloadedFile.length() / 1024.0 / 1024.0) / (elapsed / 1000.0) : 0;
+        pipelineTrace.stageEnd(PipelineStage.VIDEO_DOWNLOAD, true, "下载完成",
+                PipelineTraceService.metrics(
+                        "elapsedMs", elapsed,
+                        "fileSizeKb", sizeKb,
+                        "throughputMbPerSec", String.format("%.2f", mbPerSec)));
+        System.out.printf("✅ [yt-dlp] 下载完成 sizeKb=%d elapsedMs=%d throughput=%.2f MB/s%n",
+                sizeKb, elapsed, mbPerSec);
         return downloadedFile;
     }
 }

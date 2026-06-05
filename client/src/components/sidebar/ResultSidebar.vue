@@ -27,11 +27,69 @@
       <div class="sidebar-body">
         <div v-if="loading" class="loading-state">
           <LoadingSpinner />
-          <p>数据流处理中...</p>
+          <p>{{ loadingHint }}</p>
+          <PipelineProgress v-if="pipeline" :status="pipeline" />
         </div>
         <div v-else-if="type === 'ai'" class="markdown-content" v-html="renderedMarkdown" />
         <div v-else class="text-content">
           <pre>{{ content }}</pre>
+        </div>
+
+        <div v-if="showQa && !loading" class="qa-panel">
+          <h4 class="qa-title">向视频提问（RAG）</h4>
+          <div v-if="qaHistory?.length" class="qa-history">
+            <div class="qa-history-label">历史记录（{{ qaHistory.length }}）</div>
+            <div
+              v-for="msg in qaHistory"
+              :key="msg.id"
+              class="qa-history-item"
+              :class="{ 'is-failed': msg.status === 'FAILED' }"
+            >
+              <div class="qa-history-q">
+                <span class="qa-role">问</span>
+                <span>{{ msg.question }}</span>
+              </div>
+              <div
+                class="qa-history-a markdown-content"
+                v-html="renderQaMarkdown(msg.answer)"
+              />
+              <details v-if="msg.citations?.length" class="qa-citations compact">
+                <summary>引用（{{ msg.citations.length }}）</summary>
+                <div
+                  v-for="(c, idx) in msg.citations"
+                  :key="idx"
+                  class="citation-item"
+                >
+                  <span class="citation-meta">#{{ c.chunkIndex }} · {{ c.score?.toFixed(2) }}</span>
+                  <p>{{ c.excerpt }}</p>
+                </div>
+              </details>
+              <time v-if="msg.createdAt" class="qa-history-time">{{ formatQaTime(msg.createdAt) }}</time>
+            </div>
+          </div>
+          <p v-else class="qa-history-empty">暂无问答记录，在下方输入问题开始提问。</p>
+          <textarea
+            v-model="qaQuestionModel"
+            class="qa-input"
+            rows="3"
+            placeholder="例如：作者的核心论点是什么？"
+            @keydown.enter.exact.prevent="$emit('ask')"
+          />
+          <button class="retry-btn primary" :disabled="qaLoading" @click="$emit('ask')">
+            {{ qaLoading ? '检索生成中（长视频可能需数分钟）...' : '提问' }}
+          </button>
+          <div v-if="qaAnswer" class="qa-answer markdown-content" v-html="renderedQaAnswer" />
+          <details v-if="qaCitations?.length" class="qa-citations">
+            <summary>引用片段（{{ qaCitations.length }}）</summary>
+            <div
+              v-for="(c, idx) in qaCitations"
+              :key="idx"
+              class="citation-item"
+            >
+              <span class="citation-meta">#{{ c.chunkIndex }} · 相关度 {{ c.score?.toFixed(2) }}</span>
+              <p>{{ c.excerpt }}</p>
+            </div>
+          </details>
         </div>
 
         <div v-if="showRetry && !loading" class="sidebar-footer">
@@ -56,6 +114,7 @@ import { computed, watch, onMounted, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import LoadingSpinner from '../ui/LoadingSpinner.vue'
+import PipelineProgress from './PipelineProgress.vue'
 
 const props = defineProps({
   visible: Boolean,
@@ -63,12 +122,54 @@ const props = defineProps({
   title: { type: String, default: '' },
   content: { type: String, default: '' },
   loading: Boolean,
+  pipeline: { type: Object, default: null },
   showRetry: Boolean,
   retryLabel: { type: String, default: '重试' },
   showSecondaryRetry: Boolean,
+  showQa: Boolean,
+  qaQuestion: { type: String, default: '' },
+  qaAnswer: { type: String, default: '' },
+  qaCitations: { type: Array, default: () => [] },
+  qaHistory: { type: Array, default: () => [] },
+  qaLoading: Boolean,
 })
 
-const emit = defineEmits(['close', 'retry', 'retry-transcribe'])
+const emit = defineEmits(['close', 'retry', 'retry-transcribe', 'ask', 'update:qaQuestion'])
+
+const qaQuestionModel = computed({
+  get: () => props.qaQuestion,
+  set: (v) => emit('update:qaQuestion', v),
+})
+
+const loadingHint = computed(() =>
+  props.type === 'ai'
+    ? 'AI 正在分析中，长视频约需 1–5 分钟…'
+    : '正在处理中…'
+)
+
+const renderQaMarkdown = (text) => {
+  if (!text) return ''
+  const html = marked.parse(text)
+  return DOMPurify.sanitize(html)
+}
+
+const renderedQaAnswer = computed(() => renderQaMarkdown(props.qaAnswer))
+
+const formatQaTime = (iso) => {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
+    return d.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return ''
+  }
+}
 
 const renderedMarkdown = computed(() => {
   if (!props.content) return ''
@@ -196,6 +297,116 @@ onUnmounted(() => {
 .retry-btn.secondary:hover {
   border-color: var(--accent-primary);
   color: var(--accent-primary);
+}
+
+.qa-panel {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.qa-history {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+  padding-right: 0.25rem;
+}
+
+.qa-history-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.qa-history-empty {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin: 0 0 0.75rem;
+}
+
+.qa-history-item {
+  margin-bottom: 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.qa-history-item.is-failed {
+  border-color: rgba(220, 80, 80, 0.35);
+}
+
+.qa-history-q {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.qa-role {
+  flex-shrink: 0;
+  color: var(--accent-primary);
+}
+
+.qa-history-a {
+  font-size: 0.8125rem;
+}
+
+.qa-history-time {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.qa-citations.compact {
+  margin-top: 0.5rem;
+}
+
+.qa-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: var(--text-primary);
+}
+
+.qa-input {
+  width: 100%;
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  resize: vertical;
+}
+
+.qa-answer {
+  margin-top: 1rem;
+}
+
+.qa-citations {
+  margin-top: 1rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.citation-item {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.citation-meta {
+  display: block;
+  font-weight: 600;
+  color: var(--accent-primary);
+  margin-bottom: 0.25rem;
 }
 
 .close-btn {

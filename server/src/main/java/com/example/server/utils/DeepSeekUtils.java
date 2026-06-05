@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONException;
 import okhttp3.*;
+import com.example.server.util.RetryHelper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -23,8 +24,9 @@ public class DeepSeekUtils {
     @Value("${ai.deepseek.model}")
     private String model;
 
-    /** 超长转写截断，避免超出模型上下文 */
-    private static final int MAX_INPUT_CHARS = 48_000;
+    /** 单次请求 user 侧最大字符数（含提示词前缀）；超出则截断。DeepSeek 等长上下文模型可调大 */
+    @Value("${ai.deepseek.max-input-chars:200000}")
+    private int maxInputChars;
 
     // 配置 HTTP 客户端，超时时间设置长一点，因为 AI 思考需要时间
 
@@ -38,9 +40,40 @@ public class DeepSeekUtils {
      * 真·AI 深度思考
      */
     public String analyzeContent(String content) {
-        content = trimForModel(content);
-        System.out.println("🤖 [LLM] model=" + model + ", inputChars=" + content.length());
+        return analyzeContent("llm", content);
+    }
 
+    public String analyzeContent(String purpose, String content) {
+        final String trimmed = trimForModel(content);
+        long t0 = System.currentTimeMillis();
+        System.out.println("🤖 [LLM] purpose=" + purpose + " model=" + model + " inputChars=" + trimmed.length());
+
+        try {
+            String answer = RetryHelper.executeWithBackoff(
+                    3,
+                    1000,
+                    20000,
+                    () -> callChatCompletion(trimmed),
+                    e -> {
+                        String msg = e.getMessage() != null ? e.getMessage() : "";
+                        if (msg.contains("HTTP 4")) return false;
+                        return RetryHelper.isRetryableHttpOrNetwork(e) || msg.contains("HTTP 5");
+                    }
+            );
+            long elapsed = System.currentTimeMillis() - t0;
+            System.out.printf("🤖 [LLM] purpose=%s done elapsedMs=%d outputChars=%d charsPerSec=%.1f%n",
+                    purpose, elapsed, answer != null ? answer.length() : 0,
+                    elapsed > 0 && answer != null ? answer.length() * 1000.0 / elapsed : 0);
+            return answer;
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.err.printf("❌ [LLM] purpose=%s failed elapsedMs=%d err=%s%n",
+                    purpose, System.currentTimeMillis() - t0, e.getMessage());
+            return "❌ 分析失败: " + e.getMessage();
+        }
+    }
+
+    private String callChatCompletion(String content) throws IOException {
         String url = baseUrl + "/chat/completions";
         //提示词自由发挥，善于利用AI。
         String systemPrompt = """
@@ -112,6 +145,9 @@ public class DeepSeekUtils {
             if (!response.isSuccessful()) {
                 String errBody = response.body() != null ? response.body().string() : "";
                 System.err.println("❌ [LLM] model=" + model + " http=" + response.code() + " body=" + errBody);
+                if (response.code() >= 500) {
+                    throw new IOException("HTTP 5xx: " + response.code() + " " + errBody);
+                }
                 return "❌ AI 请求失败: " + response.code() + " - " + errBody;
             }
 
@@ -119,8 +155,7 @@ public class DeepSeekUtils {
             JSONObject jsonObject = JSON.parseObject(resultJson);
             JSONArray choices = jsonObject.getJSONArray("choices");
             if (choices == null || choices.isEmpty()) {
-                System.err.println("❌ [LLM] 响应无 choices: " + resultJson);
-                return "❌ AI 响应格式异常: choices 为空";
+                throw new IOException("AI 响应 choices 为空");
             }
             JSONObject message = choices.getJSONObject(0).getJSONObject("message");
             if (message == null) {
@@ -131,13 +166,8 @@ public class DeepSeekUtils {
                 return "❌ AI 返回内容为空";
             }
             return answer;
-
         } catch (JSONException e) {
-            e.printStackTrace();
-            return "❌ AI 响应解析失败: " + e.getMessage();
-        } catch (IOException e) {
-            e.printStackTrace();
-            return "❌ 网络连接出错: " + e.getMessage();
+            throw new IOException("AI 响应解析失败: " + e.getMessage(), e);
         }
     }
 
@@ -145,9 +175,10 @@ public class DeepSeekUtils {
         if (content == null) {
             return "";
         }
-        if (content.length() <= MAX_INPUT_CHARS) {
+        if (content.length() <= maxInputChars) {
             return content;
         }
-        return content.substring(0, MAX_INPUT_CHARS) + "\n\n[... 转写文本过长，已截断后分析 ...]";
+        System.out.println("⚠️ [LLM] 输入已截断 " + content.length() + " -> " + maxInputChars + " chars");
+        return content.substring(0, maxInputChars) + "\n\n[... 转写文本过长，已截断后分析 ...]";
     }
 }

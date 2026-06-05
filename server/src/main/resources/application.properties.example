@@ -10,8 +10,8 @@ spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
 spring.servlet.multipart.max-file-size=2048MB
 spring.servlet.multipart.max-request-size=2048MB
 
-# MyBatis
-mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.stdout.StdOutImpl
+# MyBatis（默认不打印 SQL；调试 mapper 时：logging.level.com.example.server.mapper=DEBUG）
+logging.level.com.example.server.mapper=WARN
 
 # ==============================
 # AI 服务配置（请填入你自己的 API Key）
@@ -19,10 +19,20 @@ mybatis-plus.configuration.log-impl=org.apache.ibatis.logging.stdout.StdOutImpl
 ai.deepseek.api-key=YOUR_DEEPSEEK_OR_SILICONFLOW_API_KEY
 ai.deepseek.base-url=https://api.siliconflow.cn/v1
 ai.deepseek.model=deepseek-ai/DeepSeek-V3
+# 总结/问答单次送入模型的最大字符数（长上下文模型可增大，如 200000）
+ai.deepseek.max-input-chars=200000
 ai.aliyun.api-key=YOUR_ALIYUN_API_KEY
 
 # ASR 单段最长秒数（SiliconFlow 限制 1 小时，默认 3300 = 55 分钟）
 asr.max-segment-seconds=3300
+
+# RAG（Embedding + 检索）
+ai.embedding.model=BAAI/bge-large-zh-v1.5
+rag.chunk.size=300
+rag.chunk.overlap=40
+rag.retrieve.top-k=8
+rag.embed.batch-size=8
+rag.qa.history-limit=100
 
 # ==========================================
 # Redis 配置
@@ -51,3 +61,6 @@ tool.ffmpeg.dir=C:/path/to/ffmpeg/bin
 rocketmq.name-server=127.0.0.1:9876
 rocketmq.producer.group=video-analysis-group
 rocketmq.producer.send-message-timeout=3000
+# Docker 本地开发：客户端默认连 Broker VIP 端口 10909，容器内常不可用 → 关闭后走 10911
+rocketmq.producer.vip-channel-enabled=false
+rocketmq.consumer.vip-channel-enabled=false

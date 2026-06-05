@@ -51,7 +51,7 @@
 
 针对视频处理场景中常见的 **长耗时阻塞**、**高并发资源冲突** 以及 **大文件传输不稳定** 等痛点，本项目基于 **RocketMQ + Redisson + 分片续传** 重构了系统架构，将「存储与播放」延伸为「理解与复用」。
 
-系统可接入大模型 API、自定义提示词；基于 Function Calling 支持查询信息与精准总结。
+**AI 总结**将转写全文一次直连大模型；**向视频提问**在总结完成后对转写分块向量化（RAG）检索，并附带引用片段。
 
 ---
 
@@ -117,12 +117,13 @@ flowchart TB
   subgraph Async["异步消费"]
     M[VideoAnalysisConsumer]
     ASR[ASR 转写]
-    AI[LangChain4j / DeepSeek]
+    RAG[RAG 索引 / 检索]
+    LLM[硅基流动 LLM]
   end
 
   subgraph Storage["基础设施"]
     MINIO[(MinIO 视频)]
-    MYSQL[(MySQL 元数据)]
+    MYSQL[(MySQL 元数据 + 向量块)]
     REDIS[(Redis 缓存 / 锁 / 分片)]
     RMQ[RocketMQ]
   end
@@ -135,7 +136,8 @@ flowchart TB
   RMQ --> M
   M --> L
   M --> ASR
-  M --> AI
+  ASR --> RAG
+  RAG --> LLM
   C --> REDIS
   C --> MYSQL
   M --> MYSQL
@@ -162,14 +164,23 @@ flowchart TB
 | 分布式锁 | Redisson + MD5 去重，同一热门视频避免重复转码与 AI 调用 |
 | 令牌桶限流 | 保护后端，抑制突发流量 |
 
-### 3. 任务处理链路
+### 3. RAG 理解与问答
+
+| 能力 | 说明 |
+| :--- | :--- |
+| 向量索引 | 转写完成后分块 + Embedding（硅基流动）写入 `transcript_chunks` |
+| 长文总结 | 超过阈值走检索 + Map-Reduce，避免超长上下文截断 |
+| 视频问答 | `POST /media/ask`，侧栏展示回答与引用片段 |
+
+### 4. 任务处理链路
 
 | 阶段 | 说明 |
 | :--- | :--- |
-| 入口 | 文件直传 MinIO，减轻应用服务器带宽压力 |
+| 入口 | 文件直传 MinIO；>50MB 自动分片断点续传 |
+| 去重 | 上传计算 `content_md5`，可复用已有转写与向量索引 |
 | 解耦 | Controller 发 MQ 消息后立即返回 |
-| 消费 | 消费者按视频 MD5 加锁，保证同一时刻单线程处理 |
-| 重试 | 对第三方 AI API 抖动做指数退避，保证最终一致 |
+| 消费 | 消费者按 `content_md5` 加锁，保证同内容单线程处理 |
+| 重试 | ASR / LLM 调用使用指数退避重试 |
 
 ---
 
@@ -214,7 +225,7 @@ cd server && mvn spring-boot:run
 cd client && npm install && npm run dev
 ```
 
-浏览器访问 http://localhost:5173 。`start-dev.ps1` / `init-db.ps1` 会自动创建 `users`、`media_files` 表。
+浏览器访问 http://localhost:5173 。`start-dev.ps1` / `init-db.ps1` 会自动创建 `users`、`media_files` 表。若数据库已存在，请手动执行 `mysql/init/03-rag-and-md5.sql` 以启用 RAG 与 MD5 字段。
 
 ### 服务地址
 

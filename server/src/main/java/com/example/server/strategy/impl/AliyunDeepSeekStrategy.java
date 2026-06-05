@@ -1,8 +1,10 @@
 package com.example.server.strategy.impl;
 
+import com.example.server.pipeline.PipelineStage;
+import com.example.server.service.PipelineTraceService;
+import com.example.server.service.TranscriptSummarizeService;
 import com.example.server.strategy.AiAnalysisStrategy;
 import com.example.server.utils.AliyunAsrUtils;
-import com.example.server.utils.DeepSeekUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -18,7 +20,10 @@ public class AliyunDeepSeekStrategy implements AiAnalysisStrategy {
     private AliyunAsrUtils aliyunAsrUtils;
 
     @Autowired
-    private DeepSeekUtils deepSeekUtils;
+    private TranscriptSummarizeService transcriptSummarizeService;
+
+    @Autowired
+    private PipelineTraceService pipelineTrace;
 
     @Override
     public String transcribe(String videoPath) {
@@ -32,14 +37,18 @@ public class AliyunDeepSeekStrategy implements AiAnalysisStrategy {
 
     @Override
     public String summarizeTranscript(String transcriptText) {
+        return summarizeTranscript(null, transcriptText);
+    }
+
+    @Override
+    public String summarizeTranscript(Long mediaId, String transcriptText) {
         if (transcriptText == null || transcriptText.isBlank()) {
             return "❌ 无转写文本，请先提取文字";
         }
         if (transcriptText.startsWith("❌") || transcriptText.startsWith("处理异常:")) {
             return transcriptText.startsWith("❌") ? transcriptText : "❌ " + transcriptText;
         }
-        return deepSeekUtils.analyzeContent(
-                "请对以下视频提取的文字进行总结，不需要废话，直接列出核心观点：\n" + transcriptText);
+        return transcriptSummarizeService.summarize(mediaId, transcriptText);
     }
 
 
@@ -58,16 +67,31 @@ public class AliyunDeepSeekStrategy implements AiAnalysisStrategy {
 
         try {
             System.out.println("🎵 [AI策略] 正在处理视频源: " + inputPath);
+            long durationMin = probeMediaDurationMinutes(inputPath);
+            pipelineTrace.stageStart(PipelineStage.AUDIO_EXTRACT,
+                    "源=" + (inputPath.startsWith("http") ? "远程URL" : "本地")
+                            + ", 预估时长≈" + durationMin + "分钟");
 
-            // 3. 提取音频 (FFmpeg 原生支持 HTTP URL；失败时自动重试一次)
+            long ffmpegStart = System.currentTimeMillis();
             boolean success = extractAudio(inputPath, outputMp3Path);
             if (!success) {
                 System.out.println("⚠️ [AI策略] 首次 FFmpeg 提取失败，正在重试...");
+                pipelineTrace.stageProgress(PipelineStage.AUDIO_EXTRACT, "首次失败，正在重试 FFmpeg…");
                 success = extractAudio(inputPath, outputMp3Path);
             }
-            if (!success) return "❌ FFmpeg 转换失败 (可能是网络超时或文件损坏，可点击「重新提取」重试)";
+            long ffmpegMs = System.currentTimeMillis() - ffmpegStart;
+            if (!success) {
+                pipelineTrace.stageEnd(PipelineStage.AUDIO_EXTRACT, false,
+                        "FFmpeg 转换失败", PipelineTraceService.metrics("elapsedMs", ffmpegMs));
+                return "❌ FFmpeg 转换失败 (可能是网络超时或文件损坏，可点击「重新提取」重试)";
+            }
+            File mp3 = new File(outputMp3Path);
+            pipelineTrace.stageEnd(PipelineStage.AUDIO_EXTRACT, true, "MP3 就绪",
+                    PipelineTraceService.metrics(
+                            "elapsedMs", ffmpegMs,
+                            "mp3SizeKb", mp3.length() / 1024,
+                            "videoDurationMin", durationMin));
 
-            // 4. 语音转文字
             String text = aliyunAsrUtils.audioToText(outputMp3Path);
             return text;
 

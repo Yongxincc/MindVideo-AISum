@@ -1,5 +1,7 @@
 package com.example.server.utils;
 
+import com.example.server.pipeline.PipelineStage;
+import com.example.server.service.PipelineTraceService;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
@@ -22,6 +24,9 @@ public class MinioUtils {
 
     @Value("${minio.endpoint}")
     private String endpoint;
+
+    @Autowired
+    private PipelineTraceService pipelineTrace;
 
     /**
      * 上传文件并返回访问 URL
@@ -74,10 +79,30 @@ public class MinioUtils {
         }
     }
 
+    public String uploadStream(InputStream inputStream, long size, String originalFilename, String contentType) throws Exception {
+        String suffix = "";
+        if (originalFilename != null && originalFilename.contains(".")) {
+            suffix = originalFilename.substring(originalFilename.lastIndexOf("."));
+        }
+        String newFilename = UUID.randomUUID().toString() + suffix;
+        String ct = contentType != null ? contentType : "application/octet-stream";
+        minioClient.putObject(
+                PutObjectArgs.builder()
+                        .bucket(bucketName)
+                        .object(newFilename)
+                        .stream(inputStream, size, -1)
+                        .contentType(ct)
+                        .build()
+        );
+        return endpoint + "/" + bucketName + "/" + newFilename;
+    }
+
     /**
      * 【新增】上传本地 File 对象到 MinIO
      */
     public String uploadLocalFile(java.io.File file) throws Exception {
+        pipelineTrace.stageStart(PipelineStage.MINIO_UPLOAD, file.getName());
+        long t0 = System.currentTimeMillis();
         try (java.io.FileInputStream inputStream = new java.io.FileInputStream(file)) {
             minioClient.putObject(
                     io.minio.PutObjectArgs.builder()
@@ -88,7 +113,13 @@ public class MinioUtils {
                             .build()
             );
         }
-
+        long elapsed = System.currentTimeMillis() - t0;
+        pipelineTrace.stageEnd(PipelineStage.MINIO_UPLOAD, true, "上传完成",
+                PipelineTraceService.metrics(
+                        "elapsedMs", elapsed,
+                        "fileSizeKb", file.length() / 1024));
+        System.out.printf("📦 [MinIO] uploadLocalFile %s sizeKb=%d elapsedMs=%d%n",
+                file.getName(), file.length() / 1024, elapsed);
         return endpoint + "/" + bucketName + "/" + file.getName();
     }
 }

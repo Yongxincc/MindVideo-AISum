@@ -31,6 +31,11 @@ public class MediaFile {
     private Boolean transcribing;
     private String coverUrl;
 
+    /** 文件内容 MD5，用于去重与分布式锁 */
+    private String contentMd5;
+    /** RAG 向量索引完成时间 */
+    private LocalDateTime ragIndexedAt;
+
     //【修改点】删掉了 @TableField(fill = ...) 注解
     //上传时间由数据库自动记录，Java 不插手，防止报错
     private LocalDateTime uploadTime;

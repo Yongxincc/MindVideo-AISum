@@ -53,12 +53,20 @@
       :title="sidebar.title"
       :content="sidebar.content"
       :loading="sidebar.loading"
+      :pipeline="sidebar.pipeline"
       :show-retry="sidebarRetryVisible"
       :retry-label="sidebarRetryLabel"
       :show-secondary-retry="sidebar.type === 'ai' && sidebarSecondaryRetryVisible"
+      :show-qa="sidebarQaVisible"
+      v-model:qa-question="qaState.question"
+      :qa-answer="qaState.answer"
+      :qa-citations="qaState.citations"
+      :qa-history="qaState.history"
+      :qa-loading="qaState.loading"
       @close="closeSidebar"
       @retry="onSidebarRetry"
       @retry-transcribe="transcribe(sidebar.mediaId, true)"
+      @ask="askVideo"
     />
 
     <AuthModal
@@ -122,6 +130,7 @@ const {
   uploadMessage,
   uploadProgress,
   sidebar,
+  qaState,
   activeJobCount,
   fetchList,
   uploadFile,
@@ -136,6 +145,8 @@ const {
   isAiSummaryError,
   isTranscriptError,
   isTranscriptSuccess,
+  askVideo,
+  canShowQa,
 } = useMediaTasks(() => currentUser.value?.id)
 
 const { warning } = useToast()
@@ -157,6 +168,12 @@ const sidebarRetryVisible = computed(() => {
 const sidebarRetryLabel = computed(() =>
   sidebar.value.type === 'text' ? '重新提取' : '重新分析'
 )
+
+const sidebarQaVisible = computed(() => {
+  if (!sidebar.value.visible || sidebar.value.loading) return false
+  const item = list.value.find((i) => i.id === sidebar.value.mediaId)
+  return canShowQa(item)
+})
 
 const sidebarSecondaryRetryVisible = computed(
   () =>

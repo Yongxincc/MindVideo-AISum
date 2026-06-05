@@ -3,6 +3,10 @@ package com.example.server.utils;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import okhttp3.*;
+import com.example.server.pipeline.PipelineStage;
+import com.example.server.service.PipelineTraceService;
+import com.example.server.util.RetryHelper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -24,6 +28,9 @@ public class AliyunAsrUtils {
     /** 单段 ASR 上限 1 小时，默认每段 55 分钟留余量 */
     @Value("${asr.max-segment-seconds:3300}")
     private int maxSegmentSeconds;
+
+    @Autowired
+    private PipelineTraceService pipelineTrace;
 
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(120, TimeUnit.SECONDS)
@@ -48,6 +55,8 @@ public class AliyunAsrUtils {
         int segmentCount = (int) Math.ceil(durationSec / maxSegmentSeconds);
         System.out.printf("🎤 [ASR] 音频时长 %.0f 秒，超过 %d 秒限制，将分 %d 段识别%n",
                 durationSec, maxSegmentSeconds, segmentCount);
+        pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
+                "分段识别 共 " + segmentCount + " 段");
 
         StringBuilder merged = new StringBuilder();
         List<File> tempSegments = new ArrayList<>();
@@ -70,8 +79,15 @@ public class AliyunAsrUtils {
                         i + 1, segmentCount,
                         formatTimestamp(startSec),
                         formatTimestamp(startSec + segDuration));
+                pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
+                        String.format("第 %d/%d 段 %s–%s", i + 1, segmentCount,
+                                formatTimestamp(startSec), formatTimestamp(startSec + segDuration)));
 
+                long segStart = System.currentTimeMillis();
                 String segmentText = transcribeSingle(segmentPath);
+                System.out.printf("🎤 [ASR] 第 %d/%d 段完成 elapsedMs=%d chars=%d%n",
+                        i + 1, segmentCount, System.currentTimeMillis() - segStart,
+                        segmentText != null && !segmentText.startsWith("❌") ? segmentText.length() : 0);
                 if (segmentText.startsWith("❌")) {
                     return segmentText;
                 }
@@ -99,60 +115,63 @@ public class AliyunAsrUtils {
         File file = new File(filePath);
         if (!file.exists()) return "❌ 错误：找不到文件";
 
-        String url = "https://api.siliconflow.cn/v1/audio/transcriptions";
-        int maxRetries = 3;
-        String lastError = "";
-
-        for (int i = 0; i < maxRetries; i++) {
-            try {
-                System.out.println("🎤 [ASR] 上传中 (第 " + (i + 1) + " 次尝试)...");
-
-                RequestBody requestBody = new MultipartBody.Builder()
-                        .setType(MultipartBody.FORM)
-                        .addFormDataPart("file", file.getName(),
-                                RequestBody.create(file, MediaType.parse("application/octet-stream")))
-                        .addFormDataPart("model", "TeleAI/TeleSpeechASR")
-                        .build();
-
-                Request request = new Request.Builder()
-                        .url(url)
-                        .addHeader("Authorization", "Bearer " + apiKey)
-                        .post(requestBody)
-                        .build();
-
-                try (Response response = client.newCall(request).execute()) {
-                    if (response.isSuccessful()) {
-                        String resultJson = response.body().string();
-                        JSONObject jsonObject = JSON.parseObject(resultJson);
-                        if (jsonObject.containsKey("text")) {
-                            String text = jsonObject.getString("text");
-                            if (text != null && !text.isBlank()) {
-                                return text;
-                            }
-                            lastError = "响应 text 为空";
-                        } else {
-                            lastError = "响应缺少 text 字段";
+        try {
+            return RetryHelper.executeWithBackoff(
+                    3,
+                    1000,
+                    15000,
+                    () -> callAsrOnce(file),
+                    e -> {
+                        if (e instanceof IOException io && io.getMessage() != null && io.getMessage().contains("HTTP 4")) {
+                            return !io.getMessage().contains("HTTP 4");
                         }
-                        System.err.println("⚠️ ASR 响应异常 (" + (i + 1) + "/" + maxRetries + "): " + lastError);
-                    } else {
-                        String errBody = response.body() != null ? response.body().string() : "";
-                        lastError = "HTTP " + response.code() + ": " + errBody;
-                        System.err.println("⚠️ ASR 失败 (" + (i + 1) + "/" + maxRetries + "): " + lastError);
-
-                        if (response.code() >= 500) {
-                            Thread.sleep(2000);
-                            continue;
-                        }
-                        return "❌ 识别失败: " + lastError;
+                        return RetryHelper.isRetryableHttpOrNetwork(e)
+                                || (e.getMessage() != null && e.getMessage().contains("HTTP 5"));
                     }
-                }
-            } catch (Exception e) {
-                lastError = e.getMessage();
-                System.err.println("⚠️ 网络异常 (" + (i + 1) + "/" + maxRetries + "): " + lastError);
-            }
+            );
+        } catch (Exception e) {
+            return "❌ 最终失败: " + e.getMessage();
         }
+    }
 
-        return "❌ 最终失败 (重试3次): " + lastError;
+    private String callAsrOnce(File file) throws Exception {
+        String url = "https://api.siliconflow.cn/v1/audio/transcriptions";
+        long t0 = System.currentTimeMillis();
+        System.out.println("🎤 [ASR] 上传识别: " + file.getName() + " (" + (file.length() / 1024) + " KB)");
+
+        RequestBody requestBody = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", file.getName(),
+                        RequestBody.create(file, MediaType.parse("application/octet-stream")))
+                .addFormDataPart("model", "TeleAI/TeleSpeechASR")
+                .build();
+
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .post(requestBody)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String errBody = response.body() != null ? response.body().string() : "";
+                if (response.code() >= 500) {
+                    throw new IOException("HTTP 5xx: " + response.code() + " " + errBody);
+                }
+                throw new IOException("HTTP 4xx: " + response.code() + " " + errBody);
+            }
+            String resultJson = response.body().string();
+            JSONObject jsonObject = JSON.parseObject(resultJson);
+            if (jsonObject.containsKey("text")) {
+                String text = jsonObject.getString("text");
+                if (text != null && !text.isBlank()) {
+                    System.out.printf("🎤 [ASR] API 返回 elapsedMs=%d chars=%d%n",
+                            System.currentTimeMillis() - t0, text.length());
+                    return text;
+                }
+            }
+            throw new IOException("ASR 响应缺少有效 text");
+        }
     }
 
     private double probeDurationSeconds(String audioPath) {

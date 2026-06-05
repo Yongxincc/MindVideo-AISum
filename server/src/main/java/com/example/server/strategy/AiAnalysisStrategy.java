@@ -22,4 +22,11 @@ public interface AiAnalysisStrategy {
      * 基于已有转写文本生成总结（重新分析时复用，避免重复 ASR）
      */
     String summarizeTranscript(String transcriptText);
+
+    /**
+     * 带 mediaId 的总结（长文可走 RAG）
+     */
+    default String summarizeTranscript(Long mediaId, String transcriptText) {
+        return summarizeTranscript(transcriptText);
+    }
 }
