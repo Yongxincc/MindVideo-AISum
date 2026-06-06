@@ -103,6 +103,18 @@
 			<artifactId>spring-security-crypto</artifactId>
 		</dependency>
 
+		<!-- LangChain4j：RAG 检索、ChatMemory、@Tool Function Calling -->
+		<dependency>
+			<groupId>dev.langchain4j</groupId>
+			<artifactId>langchain4j</artifactId>
+			<version>0.36.2</version>
+		</dependency>
+		<dependency>
+			<groupId>dev.langchain4j</groupId>
+			<artifactId>langchain4j-open-ai</artifactId>
+			<version>0.36.2</version>
+		</dependency>
+
 	</dependencies>
 
 	<build>

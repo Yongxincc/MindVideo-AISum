@@ -46,6 +46,9 @@ rag.chunk.overlap=80
 rag.retrieve.top-k=8
 rag.embed.batch-size=8
 rag.qa.history-limit=100
+# LangChain4j 多轮对话：Redis 记忆窗口与 TTL
+rag.qa.memory-max-messages=20
+rag.qa.memory-ttl-hours=168
 
 # ==========================================
 # Redis 配置

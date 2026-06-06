@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.server.dto.CitationDto;
 import com.example.server.dto.MediaQaMessageDto;
 import com.example.server.entity.MediaQaMessage;
+import com.example.server.langchain4j.memory.RedisChatMemoryStore;
 import com.example.server.mapper.MediaQaMessageMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +26,9 @@ public class MediaQaService {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private RedisChatMemoryStore chatMemoryStore;
 
     public void saveMessage(Long mediaId, String question, String answer,
                            List<CitationDto> citations, String status) {
@@ -67,7 +71,11 @@ public class MediaQaService {
         if (row == null || !mediaId.equals(row.getMediaId())) {
             return false;
         }
-        return messageMapper.deleteById(messageId) > 0;
+        boolean deleted = messageMapper.deleteById(messageId) > 0;
+        if (deleted) {
+            chatMemoryStore.clearForMedia(mediaId);
+        }
+        return deleted;
     }
 
     public int deleteAllByMediaId(Long mediaId) {
@@ -76,7 +84,11 @@ public class MediaQaService {
         }
         QueryWrapper<MediaQaMessage> q = new QueryWrapper<>();
         q.eq("media_id", mediaId);
-        return messageMapper.delete(q);
+        int deleted = messageMapper.delete(q);
+        if (deleted > 0) {
+            chatMemoryStore.clearForMedia(mediaId);
+        }
+        return deleted;
     }
 
     private MediaQaMessageDto toDto(MediaQaMessage row) {
