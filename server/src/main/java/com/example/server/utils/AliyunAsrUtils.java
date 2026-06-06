@@ -2,35 +2,53 @@ package com.example.server.utils;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
-import okhttp3.*;
+import com.alibaba.fastjson2.TypeReference;
 import com.example.server.pipeline.PipelineStage;
+import com.example.server.pipeline.PipelineTraceContext;
 import com.example.server.service.PipelineTraceService;
 import com.example.server.util.RetryHelper;
+import okhttp3.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.InputStreamReader;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.io.InputStreamReader;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 @Component
 public class AliyunAsrUtils {
+
+    private static final String PARTIAL_KEY_PREFIX = "media:transcript:partial:";
+    private static final long PARTIAL_TTL_HOURS = 24;
 
     @Value("${ai.deepseek.api-key}")
     private String apiKey;
 
-    /** 单段 ASR 上限 1 小时，默认每段 55 分钟留余量 */
     @Value("${asr.max-segment-seconds:3300}")
     private int maxSegmentSeconds;
 
+    @Value("${asr.segment-concurrency:3}")
+    private int segmentConcurrency;
+
     @Autowired
     private PipelineTraceService pipelineTrace;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    @Qualifier("asrSegmentExecutor")
+    private Executor asrSegmentExecutor;
 
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(120, TimeUnit.SECONDS)
@@ -39,75 +57,238 @@ public class AliyunAsrUtils {
             .retryOnConnectionFailure(true)
             .build();
 
-    public String audioToText(String filePath) {
-        File file = new File(filePath);
-        if (!file.exists()) return "❌ 错误：找不到文件";
-
-        double durationSec = probeDurationSeconds(filePath);
-        if (durationSec <= 0) {
-            return transcribeSingle(filePath);
+    public String audioToText(String mediaPath) {
+        if (mediaPath == null || mediaPath.isEmpty()) return "❌ 路径为空";
+        if (!mediaPath.startsWith("http")) {
+            File file = new File(mediaPath);
+            if (!file.exists()) return "❌ 错误：找不到文件";
         }
 
-        if (durationSec <= maxSegmentSeconds) {
-            return transcribeSingle(filePath);
+        Long mediaId = PipelineTraceContext.get();
+        double durationSec = probeDurationSeconds(mediaPath);
+        int segmentCount = durationSec <= 0 ? 1
+                : (int) Math.ceil(durationSec / maxSegmentSeconds);
+
+        String sourceLabel = mediaPath.startsWith("http") ? "远程URL" : "本地";
+        pipelineTrace.stageStart(PipelineStage.TRANSCRIPT_ASR,
+                "源=" + sourceLabel + ", 预估时长≈"
+                        + (durationSec > 0 ? formatDurationMinutes(durationSec) : "未知")
+                        + "分钟, 共 " + segmentCount + " 段, 并行度=" + segmentConcurrency);
+
+        if (segmentCount == 1) {
+            return transcribeOneSegment(mediaPath, mediaId, 0, 0, durationSec > 0 ? durationSec : -1, 1);
         }
 
-        int segmentCount = (int) Math.ceil(durationSec / maxSegmentSeconds);
-        System.out.printf("🎤 [ASR] 音频时长 %.0f 秒，超过 %d 秒限制，将分 %d 段识别%n",
-                durationSec, maxSegmentSeconds, segmentCount);
-        pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
-                "分段识别 共 " + segmentCount + " 段");
+        System.out.printf("🎤 [ASR] 媒体时长 %.0f 秒，分 %d 段识别（并行度 %d）%n",
+                durationSec, segmentCount, segmentConcurrency);
 
-        StringBuilder merged = new StringBuilder();
-        List<File> tempSegments = new ArrayList<>();
+        Map<Integer, String> partialSegments = loadPartialSegments(mediaId);
+        if (!partialSegments.isEmpty()) {
+            System.out.printf("🎤 [ASR] 续跑：已有 %d 段缓存%n", partialSegments.size());
+            pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
+                    "续跑：已完成 " + partialSegments.size() + "/" + segmentCount + " 段");
+        }
+
+        AtomicInteger completedCount = new AtomicInteger(partialSegments.size());
+        Semaphore limit = new Semaphore(Math.max(1, segmentConcurrency));
+
+        List<CompletableFuture<SegmentResult>> futures = new ArrayList<>();
+        for (int i = 0; i < segmentCount; i++) {
+            final int index = i;
+            if (partialSegments.containsKey(index)) {
+                continue;
+            }
+            double startSec = (double) i * maxSegmentSeconds;
+            double segDuration = Math.min(maxSegmentSeconds, durationSec - startSec);
+
+            CompletableFuture<SegmentResult> future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    limit.acquire();
+                    return processSegment(mediaPath, mediaId, index, startSec, segDuration,
+                            segmentCount, completedCount);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return SegmentResult.failed(index, startSec, startSec + segDuration,
+                            "❌ 分段任务被中断");
+                } finally {
+                    limit.release();
+                }
+            }, asrSegmentExecutor);
+            futures.add(future);
+        }
+
+        if (!futures.isEmpty()) {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        }
+
+        for (CompletableFuture<SegmentResult> future : futures) {
+            SegmentResult result = future.join();
+            if (result.error != null) {
+                return result.error;
+            }
+            partialSegments.put(result.index, result.text);
+        }
+
+        partialSegments = loadPartialSegments(mediaId);
+        if (partialSegments.size() < segmentCount) {
+            return "❌ 识别未完成，仅完成 " + partialSegments.size() + "/" + segmentCount + " 段";
+        }
+
+        String merged = mergeSegments(partialSegments, segmentCount, durationSec);
+        clearPartialSegments(mediaId);
+        pipelineTrace.stageEnd(PipelineStage.TRANSCRIPT_ASR, true,
+                "全部 " + segmentCount + " 段识别完成",
+                PipelineTraceService.metrics("segmentCount", segmentCount, "chars", merged.length()));
+        return merged.length() > 0 ? merged : "❌ 识别结果为空";
+    }
+
+    public void clearPartialSegments(Long mediaId) {
+        if (mediaId != null) {
+            redisTemplate.delete(PARTIAL_KEY_PREFIX + mediaId);
+        }
+    }
+
+    private SegmentResult processSegment(String mediaPath, Long mediaId, int index,
+                                         double startSec, double segDuration, int segmentCount,
+                                         AtomicInteger completedCount) {
+        String segmentPath = System.getProperty("java.io.tmpdir") + File.separator
+                + "asr_seg_" + UUID.randomUUID() + ".mp3";
+        File segmentFile = new File(segmentPath);
 
         try {
-            for (int i = 0; i < segmentCount; i++) {
-                double startSec = (double) i * maxSegmentSeconds;
-                double segDuration = Math.min(maxSegmentSeconds, durationSec - startSec);
-                String segmentPath = System.getProperty("java.io.tmpdir") + File.separator
-                        + "asr_seg_" + UUID.randomUUID() + ".mp3";
+            pipelineTrace.stageProgress(PipelineStage.AUDIO_EXTRACT,
+                    String.format("提取第 %d/%d 段 %s–%s", index + 1, segmentCount,
+                            formatTimestamp(startSec), formatTimestamp(startSec + segDuration)));
 
-                if (!extractAudioSegment(filePath, segmentPath, startSec, segDuration)) {
-                    return "❌ 音频分段失败 (第 " + (i + 1) + "/" + segmentCount + " 段)";
-                }
-
-                File segmentFile = new File(segmentPath);
-                tempSegments.add(segmentFile);
-
-                System.out.printf("🎤 [ASR] 正在识别第 %d/%d 段 (%s - %s)%n",
-                        i + 1, segmentCount,
-                        formatTimestamp(startSec),
-                        formatTimestamp(startSec + segDuration));
-                pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
-                        String.format("第 %d/%d 段 %s–%s", i + 1, segmentCount,
-                                formatTimestamp(startSec), formatTimestamp(startSec + segDuration)));
-
-                long segStart = System.currentTimeMillis();
-                String segmentText = transcribeSingle(segmentPath);
-                System.out.printf("🎤 [ASR] 第 %d/%d 段完成 elapsedMs=%d chars=%d%n",
-                        i + 1, segmentCount, System.currentTimeMillis() - segStart,
-                        segmentText != null && !segmentText.startsWith("❌") ? segmentText.length() : 0);
-                if (segmentText.startsWith("❌")) {
-                    return segmentText;
-                }
-
-                if (!segmentText.isBlank()) {
-                    if (merged.length() > 0) merged.append("\n\n");
-                    merged.append("--- 第 ").append(i + 1).append(" 段 (")
-                            .append(formatTimestamp(startSec))
-                            .append(" - ")
-                            .append(formatTimestamp(startSec + segDuration))
-                            .append(") ---\n")
-                            .append(segmentText.trim());
-                }
+            if (!extractAudioSegment(mediaPath, segmentPath, startSec, segDuration)) {
+                return SegmentResult.failed(index, startSec, startSec + segDuration,
+                        "❌ 音频分段失败 (第 " + (index + 1) + "/" + segmentCount + " 段)");
             }
 
-            return merged.length() > 0 ? merged.toString() : "❌ 识别结果为空";
+            System.out.printf("🎤 [ASR] 正在识别第 %d/%d 段 (%s - %s)%n",
+                    index + 1, segmentCount,
+                    formatTimestamp(startSec), formatTimestamp(startSec + segDuration));
+
+            long segStart = System.currentTimeMillis();
+            String segmentText = transcribeSingle(segmentPath);
+            System.out.printf("🎤 [ASR] 第 %d/%d 段完成 elapsedMs=%d chars=%d%n",
+                    index + 1, segmentCount, System.currentTimeMillis() - segStart,
+                    segmentText != null && !segmentText.startsWith("❌") ? segmentText.length() : 0);
+
+            if (segmentText.startsWith("❌")) {
+                return SegmentResult.failed(index, startSec, startSec + segDuration, segmentText);
+            }
+
+            savePartialSegment(mediaId, index, segmentText);
+            int done = completedCount.incrementAndGet();
+            pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR,
+                    String.format("已完成 %d/%d 段", done, segmentCount));
+
+            return SegmentResult.ok(index, startSec, startSec + segDuration, segmentText);
         } finally {
-            for (File temp : tempSegments) {
-                if (temp.exists()) temp.delete();
+            if (segmentFile.exists()) {
+                segmentFile.delete();
             }
+        }
+    }
+
+    private String transcribeOneSegment(String mediaPath, Long mediaId, int index,
+                                        double startSec, double segDuration, int segmentCount) {
+        String segmentPath = System.getProperty("java.io.tmpdir") + File.separator
+                + "asr_seg_" + UUID.randomUUID() + ".mp3";
+        File segmentFile = new File(segmentPath);
+
+        try {
+            Map<Integer, String> partial = loadPartialSegments(mediaId);
+            if (partial.containsKey(index)) {
+                String cached = partial.get(index);
+                clearPartialSegments(mediaId);
+                pipelineTrace.stageEnd(PipelineStage.TRANSCRIPT_ASR, true, "单段识别完成（缓存）", null);
+                return cached;
+            }
+
+            pipelineTrace.stageProgress(PipelineStage.AUDIO_EXTRACT, "提取音频…");
+
+            boolean extracted;
+            if (segDuration > 0) {
+                extracted = extractAudioSegment(mediaPath, segmentPath, startSec, segDuration);
+            } else {
+                extracted = extractFullAudio(mediaPath, segmentPath);
+            }
+
+            if (!extracted) {
+                pipelineTrace.stageEnd(PipelineStage.TRANSCRIPT_ASR, false, "音频提取失败", null);
+                return "❌ 音频提取失败";
+            }
+
+            pipelineTrace.stageProgress(PipelineStage.TRANSCRIPT_ASR, "识别中…");
+            String text = transcribeSingle(segmentPath);
+
+            if (!text.startsWith("❌")) {
+                pipelineTrace.stageEnd(PipelineStage.TRANSCRIPT_ASR, true, "单段识别完成",
+                        PipelineTraceService.metrics("chars", text.length()));
+            } else {
+                pipelineTrace.stageEnd(PipelineStage.TRANSCRIPT_ASR, false, text, null);
+            }
+            return text;
+        } finally {
+            if (segmentFile.exists()) {
+                segmentFile.delete();
+            }
+        }
+    }
+
+    private String mergeSegments(Map<Integer, String> partialSegments, int segmentCount, double durationSec) {
+        StringBuilder merged = new StringBuilder();
+        for (int i = 0; i < segmentCount; i++) {
+            String segmentText = partialSegments.get(i);
+            if (segmentText == null || segmentText.isBlank()) {
+                continue;
+            }
+            double startSec = (double) i * maxSegmentSeconds;
+            double segDuration = durationSec > 0
+                    ? Math.min(maxSegmentSeconds, durationSec - startSec)
+                    : maxSegmentSeconds;
+
+            if (merged.length() > 0) merged.append("\n\n");
+            merged.append("--- 第 ").append(i + 1).append(" 段 (")
+                    .append(formatTimestamp(startSec))
+                    .append(" - ")
+                    .append(formatTimestamp(startSec + segDuration))
+                    .append(") ---\n")
+                    .append(segmentText.trim());
+        }
+        return merged.toString();
+    }
+
+    private void savePartialSegment(Long mediaId, int index, String text) {
+        if (mediaId == null || text == null) return;
+        try {
+            Map<Integer, String> partial = loadPartialSegments(mediaId);
+            partial.put(index, text);
+            String json = JSON.toJSONString(partial);
+            redisTemplate.opsForValue().set(PARTIAL_KEY_PREFIX + mediaId, json,
+                    PARTIAL_TTL_HOURS, TimeUnit.HOURS);
+        } catch (Exception e) {
+            System.err.println("⚠️ [ASR] 保存段缓存失败: " + e.getMessage());
+        }
+    }
+
+    private Map<Integer, String> loadPartialSegments(Long mediaId) {
+        if (mediaId == null) return new TreeMap<>();
+        try {
+            String json = redisTemplate.opsForValue().get(PARTIAL_KEY_PREFIX + mediaId);
+            if (json == null || json.isBlank()) return new TreeMap<>();
+            Map<String, String> raw = JSON.parseObject(json, new TypeReference<Map<String, String>>() {});
+            if (raw == null) return new TreeMap<>();
+            TreeMap<Integer, String> result = new TreeMap<>();
+            for (Map.Entry<String, String> e : raw.entrySet()) {
+                result.put(Integer.parseInt(e.getKey()), e.getValue());
+            }
+            return result;
+        } catch (Exception e) {
+            System.err.println("⚠️ [ASR] 读取段缓存失败: " + e.getMessage());
+            return new TreeMap<>();
         }
     }
 
@@ -121,17 +302,22 @@ public class AliyunAsrUtils {
                     1000,
                     15000,
                     () -> callAsrOnce(file),
-                    e -> {
-                        if (e instanceof IOException io && io.getMessage() != null && io.getMessage().contains("HTTP 4")) {
-                            return !io.getMessage().contains("HTTP 4");
-                        }
-                        return RetryHelper.isRetryableHttpOrNetwork(e)
-                                || (e.getMessage() != null && e.getMessage().contains("HTTP 5"));
-                    }
+                    this::isRetryableAsrError
             );
         } catch (Exception e) {
             return "❌ 最终失败: " + e.getMessage();
         }
+    }
+
+    private boolean isRetryableAsrError(Exception e) {
+        if (e instanceof IOException io && io.getMessage() != null) {
+            String msg = io.getMessage();
+            if (msg.contains("HTTP 429")) return true;
+            if (msg.contains("HTTP 5")) return true;
+            if (msg.contains("HTTP 4")) return false;
+        }
+        return RetryHelper.isRetryableHttpOrNetwork(e)
+                || (e.getMessage() != null && e.getMessage().contains("HTTP 5"));
     }
 
     private String callAsrOnce(File file) throws Exception {
@@ -155,6 +341,9 @@ public class AliyunAsrUtils {
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 String errBody = response.body() != null ? response.body().string() : "";
+                if (response.code() == 429) {
+                    throw new IOException("HTTP 429: " + errBody);
+                }
                 if (response.code() >= 500) {
                     throw new IOException("HTTP 5xx: " + response.code() + " " + errBody);
                 }
@@ -174,14 +363,14 @@ public class AliyunAsrUtils {
         }
     }
 
-    private double probeDurationSeconds(String audioPath) {
+    private double probeDurationSeconds(String mediaPath) {
         Process process = null;
         try {
             List<String> command = List.of(
                     "ffprobe", "-v", "error",
                     "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1",
-                    audioPath
+                    mediaPath
             );
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
@@ -220,10 +409,14 @@ public class AliyunAsrUtils {
             command.add("-t");
             command.add(String.valueOf(durationSec));
             command.add("-vn");
+            command.add("-ac");
+            command.add("1");
+            command.add("-ar");
+            command.add("16000");
             command.add("-acodec");
             command.add("libmp3lame");
             command.add("-q:a");
-            command.add("2");
+            command.add("4");
             command.add(outputPath);
 
             ProcessBuilder pb = new ProcessBuilder(command);
@@ -244,11 +437,55 @@ public class AliyunAsrUtils {
         }
     }
 
+    private boolean extractFullAudio(String inputPath, String outputPath) {
+        Process process = null;
+        try {
+            List<String> command = List.of(
+                    "ffmpeg", "-y",
+                    "-i", inputPath,
+                    "-vn",
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "-acodec", "libmp3lame",
+                    "-q:a", "4",
+                    outputPath
+            );
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            process = pb.start();
+
+            boolean finished = process.waitFor(60, TimeUnit.MINUTES);
+            return finished && process.exitValue() == 0 && new File(outputPath).exists();
+        } catch (Exception e) {
+            System.err.println("⚠️ 全量音频提取异常: " + e.getMessage());
+            return false;
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    private long formatDurationMinutes(double seconds) {
+        return Math.max(1, (long) Math.ceil(seconds / 60));
+    }
+
     private String formatTimestamp(double seconds) {
         int total = (int) seconds;
         int h = total / 3600;
         int m = (total % 3600) / 60;
         int s = total % 60;
         return String.format("%02d:%02d:%02d", h, m, s);
+    }
+
+    private record SegmentResult(int index, double startSec, double endSec, String text, String error) {
+        static SegmentResult ok(int index, double startSec, double endSec, String text) {
+            return new SegmentResult(index, startSec, endSec, text, null);
+        }
+
+        static SegmentResult failed(int index, double startSec, double endSec, String error) {
+            return new SegmentResult(index, startSec, endSec, null, error);
+        }
     }
 }

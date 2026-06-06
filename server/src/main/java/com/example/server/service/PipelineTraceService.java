@@ -4,6 +4,7 @@ import com.example.server.dto.PipelineStatusDto;
 import com.example.server.pipeline.PipelineStage;
 import com.example.server.pipeline.PipelineStageRecord;
 import com.example.server.pipeline.PipelineTraceContext;
+import com.example.server.util.AiSummaryStatusHelper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -30,6 +31,14 @@ public class PipelineTraceService {
 
     public void beginTask(Long mediaId, String taskType) {
         if (mediaId == null) return;
+        PipelineStatusDto existing = load(mediaId);
+        if (existing != null && isTaskActive(existing)) {
+            existing.setTaskType(taskType);
+            existing.setUpdatedAt(System.currentTimeMillis());
+            save(existing);
+            log(mediaId, null, "TASK_RESUME", -1, "taskType=" + taskType, null);
+            return;
+        }
         PipelineStatusDto status = new PipelineStatusDto();
         status.setMediaId(mediaId);
         status.setTaskType(taskType);
@@ -37,6 +46,29 @@ public class PipelineTraceService {
         status.setStages(new ArrayList<>());
         save(status);
         log(mediaId, null, "TASK_BEGIN", -1, "taskType=" + taskType, null);
+    }
+
+    private boolean isTaskActive(PipelineStatusDto status) {
+        if (status == null) {
+            return false;
+        }
+        Long updatedAt = status.getUpdatedAt();
+        if (updatedAt == null
+                || System.currentTimeMillis() - updatedAt > AiSummaryStatusHelper.STALE_PIPELINE_MS) {
+            return false;
+        }
+        if (status.getCurrentStage() != null && !status.getCurrentStage().isBlank()) {
+            return true;
+        }
+        if (status.getStages() == null) {
+            return false;
+        }
+        for (PipelineStageRecord stage : status.getStages()) {
+            if ("running".equals(stage.getStatus())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void stageStart(PipelineStage stage, String detail) {

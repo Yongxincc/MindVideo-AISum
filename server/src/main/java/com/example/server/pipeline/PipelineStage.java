@@ -3,7 +3,7 @@ package com.example.server.pipeline;
 public enum PipelineStage {
     VIDEO_DOWNLOAD("视频下载"),
     MINIO_UPLOAD("对象存储上传"),
-    AUDIO_EXTRACT("音频提取(FFmpeg)"),
+    AUDIO_EXTRACT("音频分段提取(FFmpeg)"),
     TRANSCRIPT_ASR("语音转文字(ASR)"),
     RAG_INDEX("RAG 向量索引"),
     RAG_RETRIEVE("RAG 语义检索"),

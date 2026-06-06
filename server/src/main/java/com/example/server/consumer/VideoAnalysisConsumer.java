@@ -50,8 +50,8 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                 System.out.println("⚠️ [MQ消费者] 同内容任务处理中，跳过 mediaId=" + mediaId);
                 return;
             }
-            aiService.asyncAnalyze(mediaId);
-            pipelineTrace.stageEnd(mediaId, PipelineStage.MQ_CONSUME, true, "已提交线程池", null);
+            aiService.runAnalyze(mediaId);
+            pipelineTrace.stageEnd(mediaId, PipelineStage.MQ_CONSUME, true, "分析完成", null);
         } catch (Exception e) {
             e.printStackTrace();
             pipelineTrace.stageEnd(mediaId, PipelineStage.MQ_CONSUME, false, e.getMessage(), null);

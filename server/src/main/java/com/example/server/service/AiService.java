@@ -17,6 +17,7 @@ import com.example.server.pipeline.PipelineTraceContext;
 import com.example.server.dto.PipelineStatusDto;
 import com.example.server.util.AiSummaryStatusHelper;
 import com.example.server.util.TranscriptStatusHelper;
+import com.example.server.utils.AliyunAsrUtils;
 
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -37,6 +38,8 @@ public class AiService {
 
 
     public static final String TRANSCRIBING_KEY_PREFIX = "media:transcribing:";
+
+    public static final String ANALYZING_KEY_PREFIX = "media:analyzing:";
 
 
 
@@ -78,144 +81,104 @@ public class AiService {
 
 
 
-    @Async("aiTaskExecutor")
+    @Autowired
 
+    private AliyunAsrUtils aliyunAsrUtils;
+
+
+
+    @Async("aiTaskExecutor")
     public void asyncAnalyze(Long mediaId) {
+        runAnalyze(mediaId);
+    }
+
+    /** MQ 消费者同步调用，持锁期间执行完整分析，避免重复 ASR */
+    public void runAnalyze(Long mediaId) {
+        if (!tryMarkAnalyzing(mediaId)) {
+            System.out.println("⚠️ [线程池] 分析任务已在执行，跳过 mediaId=" + mediaId);
+            return;
+        }
 
         System.out.println(" [线程池] 开始处理任务，ID: " + mediaId);
-
         pipelineTrace.beginTask(mediaId, "analyze");
-
         PipelineTraceContext.set(mediaId);
 
-
-
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
-
-        if (mediaFile == null) return;
-
-
+        if (mediaFile == null) {
+            clearAnalyzing(mediaId);
+            PipelineTraceContext.clear();
+            return;
+        }
 
         try {
-
             mediaFile.setAiSummary("正在分析中，请稍候...");
-
             mediaFileMapper.updateById(mediaFile);
-
             clearListCache(mediaFile);
-
-
 
             String text = mediaFile.getTranscriptText();
 
             if (!TranscriptStatusHelper.isReady(mediaFile)) {
-
                 if (isTranscribing(mediaId) || TranscriptStatusHelper.isProcessing(mediaFile)) {
-
                     mediaFile.setAiSummary("⚠️ 文字提取进行中，请稍候完成后再分析");
-
                     mediaFileMapper.updateById(mediaFile);
-
                     clearListCache(mediaFile);
-
                     return;
-
                 }
 
-                if (!runTranscribePipeline(mediaFile, false)) {
-
-                    // dedup or failure handled inside
-
+                markTranscribing(mediaId);
+                try {
+                    if (!runTranscribePipeline(mediaFile, false)) {
+                        // dedup or failure handled inside
+                    }
+                } finally {
+                    clearTranscribing(mediaId);
                 }
 
                 mediaFile = mediaFileMapper.selectById(mediaId);
-
             }
-
-
 
             if (!TranscriptStatusHelper.isReady(mediaFile)) {
-
                 mediaFile.setAiSummary(normalizeErrorMessage(mediaFile.getTranscriptText()));
-
                 mediaFileMapper.updateById(mediaFile);
-
                 clearListCache(mediaFile);
-
                 return;
-
             }
-
-
 
             text = mediaFile.getTranscriptText();
-
             pipelineTrace.stageStart(mediaId, PipelineStage.AI_SUMMARY,
-
                     "转写字数=" + (text != null ? text.length() : 0));
-
             long t0 = System.currentTimeMillis();
-
             String summary = aiAnalysisStrategy.summarizeTranscript(mediaId, text);
-
             long elapsed = System.currentTimeMillis() - t0;
-
             pipelineTrace.stageEnd(mediaId, PipelineStage.AI_SUMMARY, !summary.startsWith("❌"),
-
                     "完成", PipelineTraceService.metrics(
-
                     "transcriptChars", text != null ? text.length() : 0,
-
                     "summaryChars", summary != null ? summary.length() : 0,
-
                     "elapsedMs", elapsed));
-
             System.out.println("🤖 [线程池] AI 总结完成 mediaId=" + mediaId
-
                     + " chars=" + (text != null ? text.length() : 0)
-
                     + " elapsedMs=" + elapsed);
-
             mediaFile.setAiSummary(summary);
-
             mediaFileMapper.updateById(mediaFile);
-
             clearListCache(mediaFile);
 
-
-
             if (!summary.startsWith("❌")) {
-
                 indexTranscriptForQa(mediaId);
-
             }
-
-
 
             System.out.println("✅ [线程池] 任务全部完成，前端轮询将在下一次命中新数据。");
 
-
-
         } catch (Exception e) {
-
             e.printStackTrace();
-
             System.err.println("❌ [线程池] 任务失败: " + e.getMessage());
-
             pipelineTrace.stageEnd(mediaId, PipelineStage.AI_SUMMARY, false, e.getMessage(), null);
-
             mediaFile.setAiSummary("❌ 分析失败: " + e.getMessage());
-
             mediaFileMapper.updateById(mediaFile);
-
             clearListCache(mediaFile);
-
         } finally {
-
+            clearAnalyzing(mediaId);
             PipelineTraceContext.clear();
-
         }
-
     }
 
 
@@ -325,6 +288,8 @@ public class AiService {
 
                 ragIndexService.deleteChunks(mediaId);
 
+                aliyunAsrUtils.clearPartialSegments(mediaId);
+
             }
 
 
@@ -403,6 +368,28 @@ public class AiService {
 
     }
 
+    public boolean isAnalyzing(Long mediaId) {
+        return Boolean.TRUE.equals(redisTemplate.hasKey(ANALYZING_KEY_PREFIX + mediaId));
+    }
+
+    private boolean tryMarkAnalyzing(Long mediaId) {
+        if (mediaId == null) {
+            return false;
+        }
+        Boolean ok = redisTemplate.opsForValue().setIfAbsent(
+                ANALYZING_KEY_PREFIX + mediaId,
+                "1",
+                4,
+                java.util.concurrent.TimeUnit.HOURS);
+        return Boolean.TRUE.equals(ok);
+    }
+
+    private void clearAnalyzing(Long mediaId) {
+        if (mediaId != null) {
+            redisTemplate.delete(ANALYZING_KEY_PREFIX + mediaId);
+        }
+    }
+
 
 
     public void enrichTranscribingFlags(java.util.List<MediaFile> list) {
@@ -427,19 +414,23 @@ public class AiService {
 
             repairStaleProcessingStatus(file, inRedis);
 
-            repairStaleAiSummary(file);
+            repairStaleAiSummary(file, inRedis || isAnalyzing(file.getId()));
 
         }
 
     }
 
     public boolean isAnalyzeActuallyRunning(Long mediaId) {
+        if (isAnalyzing(mediaId)) {
+            return true;
+        }
         PipelineStatusDto pipeline = pipelineTrace.getStatus(mediaId);
         return AiSummaryStatusHelper.isAnalyzeActuallyRunning(pipeline);
     }
 
-    private void repairStaleAiSummary(MediaFile file) {
-        if (file.getId() == null || !AiSummaryStatusHelper.looksInProgress(file.getAiSummary())) {
+    private void repairStaleAiSummary(MediaFile file, boolean activelyRunning) {
+        if (activelyRunning || file.getId() == null
+                || !AiSummaryStatusHelper.looksInProgress(file.getAiSummary())) {
             return;
         }
         PipelineStatusDto pipeline = pipelineTrace.getStatus(file.getId());
