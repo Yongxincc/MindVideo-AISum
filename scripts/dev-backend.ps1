@@ -13,5 +13,14 @@ if (-not (Test-Path $Props)) {
     exit 1
 }
 
+$PortInUse = Get-NetTCPConnection -LocalPort 9090 -State Listen -ErrorAction SilentlyContinue
+if ($PortInUse) {
+    $Pid = $PortInUse[0].OwningProcess
+    Write-Host "Port 9090 is already in use (PID $Pid)." -ForegroundColor Red
+    Write-Host "Stop the existing backend first, or the new process will exit immediately." -ForegroundColor Yellow
+    Read-Host "Press Enter to close"
+    exit 1
+}
+
 Write-Host "MindVideo backend (port 9090)" -ForegroundColor Cyan
 mvn spring-boot:run

@@ -38,7 +38,16 @@
         <div v-if="showQa && !loading" class="qa-panel">
           <h4 class="qa-title">向视频提问（RAG）</h4>
           <div v-if="qaHistory?.length" class="qa-history">
-            <div class="qa-history-label">历史记录（{{ qaHistory.length }}）</div>
+            <div class="qa-history-header">
+              <div class="qa-history-label">历史记录（{{ qaHistory.length }}）</div>
+              <button
+                type="button"
+                class="qa-history-clear"
+                @click="$emit('clear-qa-history')"
+              >
+                清空
+              </button>
+            </div>
             <div
               v-for="msg in qaHistory"
               :key="msg.id"
@@ -47,7 +56,15 @@
             >
               <div class="qa-history-q">
                 <span class="qa-role">问</span>
-                <span>{{ msg.question }}</span>
+                <span class="qa-history-q-text">{{ msg.question }}</span>
+                <button
+                  type="button"
+                  class="qa-history-delete"
+                  title="删除此条"
+                  @click="$emit('delete-qa-item', msg.id)"
+                >
+                  ×
+                </button>
               </div>
               <div
                 class="qa-history-a markdown-content"
@@ -134,7 +151,15 @@ const props = defineProps({
   qaLoading: Boolean,
 })
 
-const emit = defineEmits(['close', 'retry', 'retry-transcribe', 'ask', 'update:qaQuestion'])
+const emit = defineEmits([
+  'close',
+  'retry',
+  'retry-transcribe',
+  'ask',
+  'update:qaQuestion',
+  'delete-qa-item',
+  'clear-qa-history',
+])
 
 const qaQuestionModel = computed({
   get: () => props.qaQuestion,
@@ -312,10 +337,57 @@ onUnmounted(() => {
   padding-right: 0.25rem;
 }
 
+.qa-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
 .qa-history-label {
   font-size: 0.75rem;
   color: var(--text-muted);
-  margin-bottom: 0.5rem;
+}
+
+.qa-history-clear {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.qa-history-clear:hover {
+  color: #e55;
+  border-color: rgba(220, 80, 80, 0.45);
+}
+
+.qa-history-q-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.qa-history-delete {
+  flex-shrink: 0;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  line-height: 1;
+  font-size: 1rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.qa-history-delete:hover {
+  color: #e55;
+  background: rgba(220, 80, 80, 0.08);
 }
 
 .qa-history-empty {

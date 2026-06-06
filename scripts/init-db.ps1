@@ -131,6 +131,23 @@ CREATE TABLE IF NOT EXISTS media_qa_messages (
   KEY idx_media_qa_created (media_id, created_at),
   CONSTRAINT fk_qa_media FOREIGN KEY (media_id) REFERENCES media_files(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SET @rag_model_col = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = 'media_db' AND TABLE_NAME = 'media_files' AND COLUMN_NAME = 'rag_embed_model'
+);
+SET @sql_rag_model = IF(
+  @rag_model_col = 0,
+  'ALTER TABLE media_files ADD COLUMN rag_embed_model VARCHAR(128) NULL COMMENT ''embedding model used for RAG index'' AFTER rag_indexed_at',
+  'SELECT 1'
+);
+PREPARE stmt_rag_model FROM @sql_rag_model;
+EXECUTE stmt_rag_model;
+DEALLOCATE PREPARE stmt_rag_model;
+UPDATE media_files m
+SET rag_embed_model = 'BAAI/bge-m3'
+WHERE rag_indexed_at IS NOT NULL
+  AND (rag_embed_model IS NULL OR rag_embed_model = '')
+  AND EXISTS (SELECT 1 FROM transcript_chunks c WHERE c.media_id = m.id);
 SHOW TABLES;
 "@
 

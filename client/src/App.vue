@@ -67,6 +67,8 @@
       @retry="onSidebarRetry"
       @retry-transcribe="transcribe(sidebar.mediaId, true)"
       @ask="askVideo"
+      @delete-qa-item="deleteQaHistoryItem"
+      @clear-qa-history="clearQaHistory"
     />
 
     <AuthModal
@@ -146,6 +148,8 @@ const {
   isTranscriptError,
   isTranscriptSuccess,
   askVideo,
+  deleteQaHistoryItem,
+  clearQaHistory,
   canShowQa,
 } = useMediaTasks(() => currentUser.value?.id)
 

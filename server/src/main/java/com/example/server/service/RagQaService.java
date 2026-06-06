@@ -30,16 +30,13 @@ public class RagQaService {
                 .collect(Collectors.joining("\n\n"));
 
         String prompt = """
-                你只能根据下列「转写片段」回答问题。若片段中无相关信息，请明确说「根据现有转写无法回答」。
-                回答使用 Markdown，并在正文中标注引用编号如 [引用#1]。
-
                 用户问题：
                 """ + question + """
 
                 转写片段：
                 """ + context;
 
-        String answer = deepSeekUtils.analyzeContent(prompt);
+        String answer = deepSeekUtils.analyzeContent("qa", prompt);
 
         List<CitationDto> citations = chunks.stream()
                 .map(c -> new CitationDto(

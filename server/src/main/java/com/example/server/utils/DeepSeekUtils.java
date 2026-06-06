@@ -63,7 +63,7 @@ public class DeepSeekUtils {
                     3,
                     1000,
                     20000,
-                    () -> callChatCompletion(trimmed),
+                    () -> callChatCompletion(purpose, trimmed),
                     e -> {
                         String msg = e.getMessage() != null ? e.getMessage() : "";
                         if (msg.contains("HTTP 4")) return false;
@@ -88,10 +88,7 @@ public class DeepSeekUtils {
         }
     }
 
-    private String callChatCompletion(String content) throws IOException {
-        String url = baseUrl + "/chat/completions";
-        //提示词自由发挥，善于利用AI。
-        String systemPrompt = """
+    private static final String SUMMARY_SYSTEM_PROMPT = """
     # Role
     你是一位拥有认知心理学背景的资深信息架构师。你的专长是从杂乱的语音转录文本中提取高价值信息，并进行逻辑重构。
 
@@ -132,6 +129,23 @@ public class DeepSeekUtils {
     ## 🏷️ 领域标签
     #标签1 #标签2 #标签3
     """;
+
+    private static final String QA_SYSTEM_PROMPT = """
+    # Role
+    你是视频转写内容的问答助手。用户会提供「用户问题」和若干「转写片段」。
+
+    # Rules
+    1. 只根据提供的转写片段作答，不要编造片段中未出现的事实。
+    2. 用自然、直接的语言回答问题，像正常对话回复一样——**禁止**使用「核心摘要」「深度洞察」「原始内容精选」「领域标签」等总结报告结构。
+    3. 回答使用 Markdown；涉及的具体事实请在句末标注引用编号，如 [引用#1]。
+    4. 若片段与问题相关但未直接回答，可基于片段中的论述做合理归纳；简要说明「转写未明确谈及 X，以下根据相关讨论归纳」。
+    5. 仅当片段与问题完全无关时，简短说明无法从转写中找到相关信息。
+    6. 禁止开场白（如「好的，我来回答…」），直接给出答案正文。
+    """;
+
+    private String callChatCompletion(String purpose, String content) throws IOException {
+        String url = baseUrl + "/chat/completions";
+        String systemPrompt = isQaPurpose(purpose) ? QA_SYSTEM_PROMPT : SUMMARY_SYSTEM_PROMPT;
 
         // 3. 组装 JSON 参数
         JSONObject jsonBody = new JSONObject();
@@ -184,6 +198,10 @@ public class DeepSeekUtils {
         } catch (JSONException e) {
             throw new IOException("AI 响应解析失败: " + e.getMessage(), e);
         }
+    }
+
+    private static boolean isQaPurpose(String purpose) {
+        return "qa".equals(purpose) || "rag".equals(purpose);
     }
 
     private String trimForModel(String content) {

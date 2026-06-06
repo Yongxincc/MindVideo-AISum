@@ -110,17 +110,27 @@ public class RagIndexService {
 
         }
 
-        if (!Objects.equals(media.getRagEmbedModel(), embeddingClient.getModel())) {
+        QueryWrapper<TranscriptChunk> q = new QueryWrapper<>();
+
+        q.eq("media_id", mediaId);
+
+        if (chunkMapper.selectCount(q) <= 0) {
 
             return false;
 
         }
 
-        QueryWrapper<TranscriptChunk> q = new QueryWrapper<>();
+        String storedModel = media.getRagEmbedModel();
 
-        q.eq("media_id", mediaId);
+        if (storedModel == null || storedModel.isBlank()) {
 
-        return chunkMapper.selectCount(q) > 0;
+            backfillEmbedModel(media);
+
+            storedModel = media.getRagEmbedModel();
+
+        }
+
+        return Objects.equals(storedModel, embeddingClient.getModel());
 
     }
 
@@ -238,7 +248,24 @@ public class RagIndexService {
                     + "请确认 ai.embedding.model=BAAI/bge-m3 并已重启服务；"
                     + "若使用 bge-large 请将 rag.chunk.size 设为 ≤300。详情: " + msg;
         }
+        if (msg.contains("HTTP 401") || msg.contains("HTTP 403")) {
+            return "RAG 向量索引失败：Embedding API 鉴权失败，请检查 ai.deepseek.api-key 是否有效并已重启服务。详情: " + msg;
+        }
+        if (msg.contains("HTTP 429")) {
+            return "RAG 向量索引失败：Embedding API 请求过于频繁，请稍后重试。详情: " + msg;
+        }
+        if (msg.contains("timeout") || msg.contains("Timeout") || msg.contains("Connection")) {
+            return "RAG 向量索引失败：无法连接 Embedding API，请检查网络与 ai.deepseek.base-url。详情: " + msg;
+        }
         return "RAG 向量索引失败，请检查 Embedding API（ai.embedding.model / API Key）后重试。详情: " + msg;
+    }
+
+    /** 旧库仅有 rag_indexed_at、无 rag_embed_model 时补齐，避免每次问答都全量重建索引 */
+    private void backfillEmbedModel(MediaFile media) {
+        media.setRagEmbedModel(embeddingClient.getModel());
+        mediaFileMapper.updateById(media);
+        System.out.println("📚 [RAG] backfilled rag_embed_model mediaId=" + media.getId()
+                + " model=" + media.getRagEmbedModel());
     }
 
     public void copyIndexFrom(Long sourceMediaId, Long targetMediaId) {

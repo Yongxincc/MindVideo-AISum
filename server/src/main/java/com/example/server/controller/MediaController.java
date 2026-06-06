@@ -231,6 +231,23 @@ public class MediaController {
         return ResponseEntity.ok(mediaQaService.listHistory(mediaId));
     }
 
+    /** messageId 有值时删单条；否则清空该视频全部问答历史 */
+    @DeleteMapping("/ask-history")
+    public ResponseEntity<java.util.Map<String, Integer>> deleteAskHistory(
+            @RequestParam Long mediaId,
+            @RequestParam(required = false) Long messageId) {
+        Long userId = AuthContext.requireUserId();
+        mediaAccessService.requireOwnedMedia(mediaId, userId);
+        if (messageId != null) {
+            if (!mediaQaService.deleteMessage(mediaId, messageId)) {
+                return ResponseEntity.notFound().build();
+            }
+            return ResponseEntity.ok(java.util.Map.of("deleted", 1));
+        }
+        int deleted = mediaQaService.deleteAllByMediaId(mediaId);
+        return ResponseEntity.ok(java.util.Map.of("deleted", deleted));
+    }
+
     @GetMapping("/list")
     public List<MediaFile> getList(@RequestParam(value = "_t", required = false) String cacheBuster) {
         Long userId = AuthContext.requireUserId();

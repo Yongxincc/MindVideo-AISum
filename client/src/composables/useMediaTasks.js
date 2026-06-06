@@ -492,6 +492,44 @@ export function useMediaTasks(getUserId) {
     }
   }
 
+  const deleteQaHistoryItem = async (messageId) => {
+    const mediaId = sidebar.value.mediaId
+    if (!mediaId || !messageId) return
+    try {
+      const { ok } = await fetchJson(
+        `/media/ask-history?mediaId=${mediaId}&messageId=${messageId}`,
+        { method: 'DELETE' }
+      )
+      if (!ok) {
+        error('删除问答记录失败')
+        return
+      }
+      qaState.value.history = qaState.value.history.filter((m) => m.id !== messageId)
+      success('已删除该条问答')
+    } catch {
+      error('删除问答记录失败')
+    }
+  }
+
+  const clearQaHistory = async () => {
+    const mediaId = sidebar.value.mediaId
+    if (!mediaId || !qaState.value.history?.length) return
+    if (!window.confirm('确定清空该视频的全部问答记录吗？此操作不可撤销。')) return
+    try {
+      const { ok } = await fetchJson(`/media/ask-history?mediaId=${mediaId}`, {
+        method: 'DELETE',
+      })
+      if (!ok) {
+        error('清空问答记录失败')
+        return
+      }
+      qaState.value.history = []
+      success('问答记录已清空')
+    } catch {
+      error('清空问答记录失败')
+    }
+  }
+
   const openSidebar = (type, title) => {
     sidebar.value.visible = true
     sidebar.value.type = type
@@ -519,7 +557,7 @@ export function useMediaTasks(getUserId) {
     }
   }
 
-  const pollAskStatus = async (mediaId, maxAttempts = 120) => {
+  const pollAskStatus = async (mediaId, maxAttempts = 180) => {
     for (let i = 0; i < maxAttempts; i++) {
       const { ok, data } = await fetchJson(
         `/media/ask-status?mediaId=${mediaId}&_t=${Date.now()}`
@@ -534,7 +572,7 @@ export function useMediaTasks(getUserId) {
       }
       await new Promise((r) => setTimeout(r, 2000))
     }
-    throw new Error('问答超时，请稍后重试')
+    throw new Error('问答超时（首次提问可能需 1–3 分钟建立向量索引），请稍后重试')
   }
 
   const askVideo = async () => {
@@ -881,6 +919,8 @@ export function useMediaTasks(getUserId) {
     transcribe,
     aiAnalyze,
     askVideo,
+    deleteQaHistoryItem,
+    clearQaHistory,
     canShowQa,
     closeSidebar,
     isActionLoading,

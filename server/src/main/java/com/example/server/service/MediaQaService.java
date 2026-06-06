@@ -58,6 +58,27 @@ public class MediaQaService {
         return rows.stream().map(this::toDto).toList();
     }
 
+    /** @return true 表示已删除 */
+    public boolean deleteMessage(Long mediaId, Long messageId) {
+        if (mediaId == null || messageId == null) {
+            return false;
+        }
+        MediaQaMessage row = messageMapper.selectById(messageId);
+        if (row == null || !mediaId.equals(row.getMediaId())) {
+            return false;
+        }
+        return messageMapper.deleteById(messageId) > 0;
+    }
+
+    public int deleteAllByMediaId(Long mediaId) {
+        if (mediaId == null) {
+            return 0;
+        }
+        QueryWrapper<MediaQaMessage> q = new QueryWrapper<>();
+        q.eq("media_id", mediaId);
+        return messageMapper.delete(q);
+    }
+
     private MediaQaMessageDto toDto(MediaQaMessage row) {
         List<CitationDto> citations = parseCitations(row.getCitationsJson());
         return new MediaQaMessageDto(

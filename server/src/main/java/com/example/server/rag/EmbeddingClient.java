@@ -5,6 +5,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.example.server.util.RetryHelper;
 import okhttp3.*;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -41,6 +42,18 @@ public class EmbeddingClient {
             .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build();
+
+    @PostConstruct
+    void logConfig() {
+        String key = apiKey == null ? "" : apiKey.trim();
+        if (key.isEmpty()) {
+            System.err.println("❌ [Embedding] ai.deepseek.api-key 未配置，RAG 向量索引将失败");
+            return;
+        }
+        System.out.println("📐 [Embedding] model=" + embeddingModel
+                + " maxInputChars=" + effectiveMaxInputChars()
+                + " baseUrl=" + baseUrl);
+    }
 
     public String getModel() {
         return embeddingModel;
@@ -134,6 +147,9 @@ public class EmbeddingClient {
     }
 
     private List<float[]> callEmbeddingsApi(List<String> texts) throws IOException {
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IOException("Embedding API Key 未配置（ai.deepseek.api-key）");
+        }
         String url = baseUrl + "/embeddings";
         JSONObject body = new JSONObject();
         body.put("model", embeddingModel);

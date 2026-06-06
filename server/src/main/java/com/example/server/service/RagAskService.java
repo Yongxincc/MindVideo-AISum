@@ -67,7 +67,7 @@ public class RagAskService {
                 "RUNNING",
                 null,
                 List.of(),
-                "正在检索转写并生成回答…");
+                "正在建立向量索引并检索转写（长视频首次约 1–3 分钟）…");
         save(mediaId, pending);
         aiTaskExecutor.execute(() -> executeAsk(mediaId, question));
         return pending;
@@ -92,6 +92,11 @@ public class RagAskService {
             e.printStackTrace();
             String errAnswer = "❌ 问答失败: " + e.getMessage();
             save(mediaId, new AskStatusDto("FAILED", errAnswer, List.of(), e.getMessage()));
+            persistHistory(mediaId, question, errAnswer, List.of(), "FAILED");
+        } catch (Throwable t) {
+            t.printStackTrace();
+            String errAnswer = "❌ 问答异常: " + t.getMessage();
+            save(mediaId, new AskStatusDto("FAILED", errAnswer, List.of(), t.getMessage()));
             persistHistory(mediaId, question, errAnswer, List.of(), "FAILED");
         }
     }
