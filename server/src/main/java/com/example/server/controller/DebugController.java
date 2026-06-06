@@ -12,6 +12,7 @@ import com.example.server.service.ContentDedupService;
 import com.example.server.service.PipelineTraceService;
 import com.example.server.util.TranscriptStatusHelper;
 import com.example.server.strategy.AiAnalysisStrategy;
+import com.example.server.utils.AliyunAsrUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.FileSystemResource;
@@ -64,6 +65,9 @@ public class DebugController {
 
     @Autowired
     private MediaAccessService mediaAccessService;
+
+    @Autowired
+    private AliyunAsrUtils aliyunAsrUtils;
 
     /** 查询媒体处理流水线各阶段耗时与当前进度（Redis，供前端轮询） */
     @GetMapping("/pipeline")
@@ -122,8 +126,11 @@ public class DebugController {
             String userIdKey = (file.getUserId() == null) ? "anon" : String.valueOf(file.getUserId());
             redisTemplate.delete("media:list:user:" + userIdKey);
 
-            //发送消息
-            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS");
+            if (force) {
+                aliyunAsrUtils.clearPartialSegments(id);
+            }
+
+            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS", force);
             rocketMQTemplate.convertAndSend("video-analysis-topic", msg);
             pipelineTrace.stageEnd(id, PipelineStage.MQ_DISPATCH, true, "已投递 RocketMQ", null);
 
@@ -155,16 +162,19 @@ public class DebugController {
 
             if (mediaFile == null) return "❌ 找不到文件记录";
 
-            if (!force && aiService.isTranscribing(id)) {
-                return "⚠️ 提取任务已在后台运行，请勿重复提交";
+            aiService.repairStaleTranscribingLocks(mediaFile);
+            if (!force && aiService.isTranscribingForContent(mediaFile)) {
+                return "⚠️ 提取任务已在后台运行（含同内容任务），请勿重复提交";
             }
             if (!force && TranscriptStatusHelper.isReady(mediaFile)) {
                 return "✅ 已有完整转写结果，可直接查看；如需重做请点「重新提取」";
             }
 
-            // 用 Redis 标记进行中，不覆盖已有 transcript_text（避免丢失已转写结果）
+            if (!aiService.tryMarkTranscribingByContent(mediaFile)) {
+                return "⚠️ 提取任务已在后台运行（含同内容任务），请勿重复提交";
+            }
+
             pipelineTrace.beginTask(id, "transcribe");
-            aiService.markTranscribing(id);
             if (mediaFile.getUserId() != null) {
                 redisTemplate.delete("media:list:user:" + mediaFile.getUserId());
             }
@@ -172,8 +182,8 @@ public class DebugController {
             aiService.asyncTranscribe(id, force);
 
             return force
-                    ? "✅ 已重新提交提取任务！长视频约需 30–90 分钟，请耐心等待。"
-                    : "✅ 提取任务已后台运行！长视频约需 30–90 分钟，请耐心等待。";
+                    ? "✅ 已重新提交提取任务！2 小时视频约需 5–10 分钟，请耐心等待。"
+                    : "✅ 提取任务已后台运行！2 小时视频约需 5–10 分钟，请耐心等待。";
         } catch (Exception e) {
             e.printStackTrace();
             return "❌ 提交失败: " + e.getMessage();

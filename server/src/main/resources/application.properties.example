@@ -28,10 +28,12 @@ ai.deepseek.max-input-chars=200000
 ai.deepseek.read-timeout-seconds=900
 ai.aliyun.api-key=YOUR_ALIYUN_API_KEY
 
-# ASR 单段最长秒数（SiliconFlow 限制 1 小时，默认 3300 = 55 分钟）
-asr.max-segment-seconds=3300
-# ASR 分段并行度（单条长视频内同时识别的段数，遇 429 可降为 1–2）
-asr.segment-concurrency=3
+# ASR 每段时长（秒），默认 600 = 10 分钟（SiliconFlow 单段上限 1 小时）
+asr.max-segment-seconds=600
+# ASR 分段并行度（单条长视频内同时识别的段数，遇 429 可降为 3–4）
+asr.segment-concurrency=6
+# 每轮并行识别预估耗时（秒），用于界面展示预计等待时间
+asr.estimated-wave-seconds=120
 
 # RAG（Embedding + 检索）
 # bge-large-zh-v1.5 约 512 token/条；长切片用 BAAI/bge-m3 并配合 ai.embedding.max-input-chars

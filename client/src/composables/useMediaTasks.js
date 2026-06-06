@@ -446,6 +446,28 @@ export function useMediaTasks(getUserId) {
     return false
   }
 
+  const isTranscriptActuallyRunning = (pipeline) => {
+    if (!pipeline) return false
+    if (pipeline.updatedAt && Date.now() - pipeline.updatedAt > STALE_PIPELINE_MS) {
+      return false
+    }
+    const codes = ['TRANSCRIPT_ASR', 'AUDIO_EXTRACT']
+    if (codes.includes(pipeline.currentStage)) return true
+    return pipeline.stages?.some(
+      (s) => codes.includes(s.code) && s.status === 'running'
+    )
+  }
+
+  const isTranscriptStaleProgress = async (id, item) => {
+    const inProgress =
+      item?.transcribing ||
+      getTranscriptStatus(item) === TRANSCRIPT_STATUS.PROCESSING
+    if (!inProgress) return false
+    const pipeline = await fetchPipelineStatus(id)
+    if (!pipeline) return true
+    return !isTranscriptActuallyRunning(pipeline)
+  }
+
   const isAiSummaryTerminal = (summary) => {
     if (!summary || summary.length < 8) return false
     if (isAiSummaryInProgress(summary)) return false
@@ -670,6 +692,32 @@ export function useMediaTasks(getUserId) {
         }
       } else if (type === 'text') {
         if (item.transcribing || getTranscriptStatus(item) === TRANSCRIPT_STATUS.PROCESSING) {
+          const stale = await isTranscriptStaleProgress(id, item)
+          if (stale) {
+            clearInterval(timer)
+            clearInterval(pipelineTimer)
+            delete pollingTimers.value[id]
+            setLoadingAction(id, type, false)
+            if (
+              sidebar.value.visible &&
+              sidebar.value.mediaId === id &&
+              sidebar.value.type === type
+            ) {
+              sidebar.value.loading = false
+              sidebar.value.content =
+                '❌ 上次转写已中断，请点击「重新提取」重试'
+            }
+            warning('转写任务已中断，请重新点击「提取文字」')
+            return
+          }
+          if (
+            sidebar.value.visible &&
+            sidebar.value.mediaId === id &&
+            sidebar.value.type === type
+          ) {
+            const pipeline = await fetchPipelineStatus(id)
+            if (pipeline) sidebar.value.pipeline = pipeline
+          }
           return
         }
         const text = item.transcriptText || ''
@@ -741,11 +789,16 @@ export function useMediaTasks(getUserId) {
     }
 
     if (!forceRetry && item && isTranscriptInProgress(item)) {
+      const stale = await isTranscriptStaleProgress(id, item)
+      if (stale) {
+        info('检测到上次转写已中断，正在重新提交...')
+        return transcribe(id, true)
+      }
       openSidebar('text', '全量文字提取')
       sidebar.value.loading = true
       sidebar.value.content =
         (isTranscriptSuccess(item) ? item.transcriptText + '\n\n' : '') +
-        '后台正在转写中，请稍候…（长视频约 30–90 分钟）'
+        '后台正在转写中，请稍候…（2 小时视频约 5–10 分钟）'
       if (pollingTimers.value[id]?.type !== 'text') {
         startPolling(id, 'text')
       } else {
@@ -791,9 +844,18 @@ export function useMediaTasks(getUserId) {
         return
       }
 
+      if (text.includes('⚠️') && text.includes('已在后台运行')) {
+        const stale = await isTranscriptStaleProgress(id, item)
+        if (stale) {
+          info('检测到僵死转写状态，正在重新提交...')
+          return transcribe(id, true)
+        }
+      }
+
       if (
         text.includes('限流') ||
         text.includes('请勿重复') ||
+        text.includes('⚠️') ||
         text.includes('❌') ||
         !ok
       ) {
@@ -807,7 +869,7 @@ export function useMediaTasks(getUserId) {
       }
 
       startPolling(id, 'text')
-      sidebar.value.content = text + '\n\n(后台处理中，长视频可能需要 30–90 分钟...)'
+      sidebar.value.content = text + '\n\n(后台处理中，2 小时视频约 5–10 分钟...)'
     } catch (e) {
       sidebar.value.content = 'Error: ' + e.message
       sidebar.value.loading = false

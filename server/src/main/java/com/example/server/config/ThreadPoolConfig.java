@@ -27,7 +27,7 @@ public class ThreadPoolConfig {
 
     @Bean("asrSegmentExecutor")
     public Executor asrSegmentExecutor(
-            @Value("${asr.segment-concurrency:3}") int segmentConcurrency) {
+            @Value("${asr.segment-concurrency:6}") int segmentConcurrency) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         int core = Math.max(1, segmentConcurrency);
         executor.setCorePoolSize(core);

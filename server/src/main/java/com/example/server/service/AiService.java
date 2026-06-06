@@ -16,6 +16,7 @@ import com.example.server.pipeline.PipelineTraceContext;
 
 import com.example.server.dto.PipelineStatusDto;
 import com.example.server.util.AiSummaryStatusHelper;
+import com.example.server.util.TranscriptStaleHelper;
 import com.example.server.util.TranscriptStatusHelper;
 import com.example.server.utils.AliyunAsrUtils;
 
@@ -38,6 +39,8 @@ public class AiService {
 
 
     public static final String TRANSCRIBING_KEY_PREFIX = "media:transcribing:";
+
+    public static final String TRANSCRIBING_MD5_KEY_PREFIX = "media:transcribing:md5:";
 
     public static final String ANALYZING_KEY_PREFIX = "media:analyzing:";
 
@@ -89,17 +92,21 @@ public class AiService {
 
     @Async("aiTaskExecutor")
     public void asyncAnalyze(Long mediaId) {
-        runAnalyze(mediaId);
+        runAnalyze(mediaId, false);
     }
 
     /** MQ 消费者同步调用，持锁期间执行完整分析，避免重复 ASR */
-    public void runAnalyze(Long mediaId) {
+    public boolean runAnalyze(Long mediaId) {
+        return runAnalyze(mediaId, false);
+    }
+
+    public boolean runAnalyze(Long mediaId, boolean force) {
         if (!tryMarkAnalyzing(mediaId)) {
             System.out.println("⚠️ [线程池] 分析任务已在执行，跳过 mediaId=" + mediaId);
-            return;
+            return false;
         }
 
-        System.out.println(" [线程池] 开始处理任务，ID: " + mediaId);
+        System.out.println(" [线程池] 开始处理任务，ID: " + mediaId + (force ? " (强制)" : ""));
         pipelineTrace.beginTask(mediaId, "analyze");
         PipelineTraceContext.set(mediaId);
 
@@ -107,29 +114,51 @@ public class AiService {
         if (mediaFile == null) {
             clearAnalyzing(mediaId);
             PipelineTraceContext.clear();
-            return;
+            return false;
         }
 
+        repairStaleTranscribingLocks(mediaFile);
+        mediaFile = refreshTranscriptStatusIfStale(mediaFile);
+
+        boolean success = false;
         try {
+            if (force) {
+                aliyunAsrUtils.clearPartialSegments(mediaId);
+            }
+
             mediaFile.setAiSummary("正在分析中，请稍候...");
             mediaFileMapper.updateById(mediaFile);
             clearListCache(mediaFile);
 
-            String text = mediaFile.getTranscriptText();
+            if (!TranscriptStatusHelper.isReady(mediaFile)) {
+                if (!force && contentDedupService.tryReuseTranscript(mediaFile)) {
+                    System.out.println(" [线程池] MD5 去重复用转写，ID: " + mediaId);
+                    mediaFile = mediaFileMapper.selectById(mediaId);
+                }
+            }
 
             if (!TranscriptStatusHelper.isReady(mediaFile)) {
+                if (isTranscribingForContent(mediaFile) && !isTranscribing(mediaId)) {
+                    mediaFile.setAiSummary("⚠️ 同内容视频正在其他任务中转写，请稍候");
+                    mediaFileMapper.updateById(mediaFile);
+                    clearListCache(mediaFile);
+                    return false;
+                }
                 if (isTranscribing(mediaId) || TranscriptStatusHelper.isProcessing(mediaFile)) {
                     mediaFile.setAiSummary("⚠️ 文字提取进行中，请稍候完成后再分析");
                     mediaFileMapper.updateById(mediaFile);
                     clearListCache(mediaFile);
-                    return;
+                    return false;
                 }
 
-                markTranscribing(mediaId);
+                if (!tryMarkTranscribingByContent(mediaFile)) {
+                    mediaFile.setAiSummary("⚠️ 同内容视频转写进行中，请稍候");
+                    mediaFileMapper.updateById(mediaFile);
+                    clearListCache(mediaFile);
+                    return false;
+                }
                 try {
-                    if (!runTranscribePipeline(mediaFile, false)) {
-                        // dedup or failure handled inside
-                    }
+                    runTranscribePipeline(mediaFile, force);
                 } finally {
                     clearTranscribing(mediaId);
                 }
@@ -141,16 +170,17 @@ public class AiService {
                 mediaFile.setAiSummary(normalizeErrorMessage(mediaFile.getTranscriptText()));
                 mediaFileMapper.updateById(mediaFile);
                 clearListCache(mediaFile);
-                return;
+                return false;
             }
 
-            text = mediaFile.getTranscriptText();
+            String text = mediaFile.getTranscriptText();
             pipelineTrace.stageStart(mediaId, PipelineStage.AI_SUMMARY,
                     "转写字数=" + (text != null ? text.length() : 0));
             long t0 = System.currentTimeMillis();
             String summary = aiAnalysisStrategy.summarizeTranscript(mediaId, text);
             long elapsed = System.currentTimeMillis() - t0;
-            pipelineTrace.stageEnd(mediaId, PipelineStage.AI_SUMMARY, !summary.startsWith("❌"),
+            boolean summaryOk = !summary.startsWith("❌");
+            pipelineTrace.stageEnd(mediaId, PipelineStage.AI_SUMMARY, summaryOk,
                     "完成", PipelineTraceService.metrics(
                     "transcriptChars", text != null ? text.length() : 0,
                     "summaryChars", summary != null ? summary.length() : 0,
@@ -162,11 +192,12 @@ public class AiService {
             mediaFileMapper.updateById(mediaFile);
             clearListCache(mediaFile);
 
-            if (!summary.startsWith("❌")) {
+            if (summaryOk) {
                 indexTranscriptForQa(mediaId);
             }
 
             System.out.println("✅ [线程池] 任务全部完成，前端轮询将在下一次命中新数据。");
+            success = summaryOk;
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -179,6 +210,7 @@ public class AiService {
             clearAnalyzing(mediaId);
             PipelineTraceContext.clear();
         }
+        return success;
     }
 
 
@@ -254,7 +286,8 @@ public class AiService {
 
         if (mediaFile == null) return;
 
-
+        repairStaleTranscribingLocks(mediaFile);
+        mediaFile = refreshTranscriptStatusIfStale(mediaFile);
 
         try {
 
@@ -292,11 +325,20 @@ public class AiService {
 
             }
 
+            if (!isTranscribing(mediaId) && !tryMarkTranscribingByContent(mediaFile)) {
+                System.out.println("⚠️ [线程池] 同内容转写进行中，跳过 mediaId=" + mediaId);
+                TranscriptStatusHelper.applyResult(mediaFile,
+                        "❌ 转写被同内容任务占用，请稍后重试或点「重新提取」");
+                mediaFileMapper.updateById(mediaFile);
+                clearListCache(mediaFile);
+                return;
+            }
 
-
-            runTranscribePipeline(mediaFile, force);
-
-            clearTranscribing(mediaId);
+            try {
+                runTranscribePipeline(mediaFile, force);
+            } finally {
+                clearTranscribing(mediaId);
+            }
 
             clearListCache(mediaFile);
 
@@ -333,39 +375,67 @@ public class AiService {
 
 
     public void markTranscribing(Long mediaId) {
-
         redisTemplate.opsForValue().set(
-
                 TRANSCRIBING_KEY_PREFIX + mediaId, "1", 4, java.util.concurrent.TimeUnit.HOURS);
 
-
-
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
-
         if (mediaFile != null) {
-
             mediaFile.setTranscriptStatus(TranscriptStatus.PROCESSING);
-
             mediaFileMapper.updateById(mediaFile);
-
         }
-
     }
 
-
+    /** 同内容（MD5）全局只允许一个转写任务，避免段缓存并发写冲突 */
+    public boolean tryMarkTranscribingByContent(MediaFile mediaFile) {
+        if (mediaFile == null || mediaFile.getId() == null) {
+            return false;
+        }
+        Long mediaId = mediaFile.getId();
+        String md5 = mediaFile.getContentMd5();
+        if (md5 != null && !md5.isBlank()) {
+            String md5Key = TRANSCRIBING_MD5_KEY_PREFIX + md5;
+            Boolean ok = redisTemplate.opsForValue().setIfAbsent(
+                    md5Key, String.valueOf(mediaId), 4, java.util.concurrent.TimeUnit.HOURS);
+            if (!Boolean.TRUE.equals(ok)) {
+                String owner = redisTemplate.opsForValue().get(md5Key);
+                if (!String.valueOf(mediaId).equals(owner)) {
+                    return false;
+                }
+            }
+        }
+        markTranscribing(mediaId);
+        return true;
+    }
 
     public void clearTranscribing(Long mediaId) {
-
         redisTemplate.delete(TRANSCRIBING_KEY_PREFIX + mediaId);
 
+        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
+        if (mediaFile != null && mediaFile.getContentMd5() != null && !mediaFile.getContentMd5().isBlank()) {
+            String md5Key = TRANSCRIBING_MD5_KEY_PREFIX + mediaFile.getContentMd5();
+            String owner = redisTemplate.opsForValue().get(md5Key);
+            if (String.valueOf(mediaId).equals(owner)) {
+                redisTemplate.delete(md5Key);
+            }
+        }
     }
 
-
-
     public boolean isTranscribing(Long mediaId) {
-
         return Boolean.TRUE.equals(redisTemplate.hasKey(TRANSCRIBING_KEY_PREFIX + mediaId));
+    }
 
+    public boolean isTranscribingForContent(MediaFile mediaFile) {
+        if (mediaFile == null) {
+            return false;
+        }
+        if (isTranscribing(mediaFile.getId())) {
+            return true;
+        }
+        String md5 = mediaFile.getContentMd5();
+        if (md5 == null || md5.isBlank()) {
+            return false;
+        }
+        return Boolean.TRUE.equals(redisTemplate.hasKey(TRANSCRIBING_MD5_KEY_PREFIX + md5));
     }
 
     public boolean isAnalyzing(Long mediaId) {
@@ -392,6 +462,82 @@ public class AiService {
 
 
 
+    public boolean isTranscribeActuallyRunning(Long mediaId) {
+        if (mediaId == null) {
+            return false;
+        }
+        return TranscriptStaleHelper.isTranscribeActuallyRunning(pipelineTrace.getStatus(mediaId));
+    }
+
+    /** 清除僵死的转写 Redis 锁（服务重启、任务异常退出后） */
+    public void repairStaleTranscribingLocks(MediaFile file) {
+        if (file == null || file.getId() == null) {
+            return;
+        }
+        PipelineStatusDto pipeline = pipelineTrace.getStatus(file.getId());
+
+        if (isTranscribing(file.getId())
+                && TranscriptStaleHelper.isStaleTranscribing(true, pipeline)) {
+            System.out.println("⚠️ [转写锁修复] 清除僵死 Redis mediaId=" + file.getId());
+            clearTranscribing(file.getId());
+        }
+
+        String md5 = file.getContentMd5();
+        if (md5 == null || md5.isBlank()) {
+            return;
+        }
+        String md5Key = TRANSCRIBING_MD5_KEY_PREFIX + md5;
+        if (!Boolean.TRUE.equals(redisTemplate.hasKey(md5Key))) {
+            return;
+        }
+        String owner = redisTemplate.opsForValue().get(md5Key);
+        boolean ownerRunning = false;
+        if (owner != null) {
+            try {
+                ownerRunning = TranscriptStaleHelper.isTranscribeActuallyRunning(
+                        pipelineTrace.getStatus(Long.parseLong(owner)));
+            } catch (NumberFormatException ignored) {
+                ownerRunning = false;
+            }
+        }
+        if (!ownerRunning) {
+            System.out.println("⚠️ [转写锁修复] 清除僵死 MD5 锁 md5=" + md5 + " owner=" + owner);
+            redisTemplate.delete(md5Key);
+            if (owner != null) {
+                try {
+                    clearTranscribing(Long.parseLong(owner));
+                } catch (NumberFormatException ignored) {
+                    // ignore
+                }
+            }
+        }
+    }
+
+    private MediaFile refreshTranscriptStatusIfStale(MediaFile file) {
+        if (file == null || file.getId() == null) {
+            return file;
+        }
+        if (!TranscriptStatus.PROCESSING.equals(TranscriptStatusHelper.resolve(file))) {
+            return file;
+        }
+        if (isTranscribeActuallyRunning(file.getId())) {
+            return file;
+        }
+        if (isTranscribingForContent(file)) {
+            repairStaleTranscribingLocks(file);
+        }
+        String inferred = TranscriptStatusHelper.inferFromText(file.getTranscriptText());
+        if (TranscriptStatus.PROCESSING.equals(inferred)) {
+            inferred = TranscriptStatus.NONE;
+        }
+        System.out.println("⚠️ [转写状态修复] mediaId=" + file.getId()
+                + " PROCESSING -> " + inferred);
+        file.setTranscriptStatus(inferred);
+        file.setTranscribing(false);
+        mediaFileMapper.updateById(file);
+        return mediaFileMapper.selectById(file.getId());
+    }
+
     public void enrichTranscribingFlags(java.util.List<MediaFile> list) {
 
         if (list == null) return;
@@ -400,7 +546,9 @@ public class AiService {
 
             if (file.getId() == null) continue;
 
-            boolean inRedis = isTranscribing(file.getId());
+            repairStaleTranscribingLocks(file);
+
+            boolean inRedis = isTranscribingForContent(file);
 
             file.setTranscribing(inRedis);
 
@@ -455,10 +603,15 @@ public class AiService {
 
     private void repairStaleProcessingStatus(MediaFile file, boolean inRedis) {
 
-        if (inRedis || !TranscriptStatus.PROCESSING.equals(TranscriptStatusHelper.resolve(file))) {
+        if (!TranscriptStatus.PROCESSING.equals(TranscriptStatusHelper.resolve(file))) {
 
             return;
 
+        }
+
+        PipelineStatusDto pipeline = pipelineTrace.getStatus(file.getId());
+        if (inRedis && TranscriptStaleHelper.isTranscribeActuallyRunning(pipeline)) {
+            return;
         }
 
         String inferred = TranscriptStatusHelper.inferFromText(file.getTranscriptText());
